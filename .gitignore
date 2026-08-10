@@ -11,3 +11,6 @@ venv/
 # IDE
 .idea/
 .vscode/
+
+# Obsidian (carpeta interna del vault, no se versiona)
+.obsidian/
