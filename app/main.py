@@ -24,7 +24,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="API REST del generador de horarios escolares (CSP).",
+    description="API RESTo del generador de horarios escolares (CSP).",
 )
 
 # ----------------------------------------------------------------------------
