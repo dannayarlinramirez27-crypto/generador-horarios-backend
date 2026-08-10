@@ -1,6 +1,15 @@
+# --- Web framework ---
 fastapi
 uvicorn[standard]
+
+# --- Validación / serialización ---
 pydantic
 pydantic-settings
+python-dotenv
+email-validator
+
+# --- Base de datos (PostgreSQL / Supabase) ---
+# psycopg v3 (sucesor de psycopg2): drivers binarios + pool de conexiones.
+# Compatible con Python 3.14 y PostgreSQL >= 14.
 psycopg[binary]
 psycopg-pool
