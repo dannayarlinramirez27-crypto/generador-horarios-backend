@@ -2,13 +2,17 @@
 
 Endpoints (PLAN §7):
   · POST  /horarios/generar      (T-021) ejecuta el motor CSP y persiste.
+  · POST  /horarios/vacio         crea un horario en blanco (estado borrador).
   · GET   /horarios              (T-024) lista horarios guardados.
   · GET   /horarios/{id}         (T-024) devuelve horario + sus celdas.
   · POST  /horarios/{id}/editar  (T-023) mueve/agrega una celda validando en vivo.
+  · DELETE /horarios/{id}/celdas/{celda_id}  elimina una celda de un horario.
   · POST  /horarios/validar      (T-022) verifica restricciones de un horario.
 """
 
 from __future__ import annotations
+
+from datetime import time
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -99,6 +103,50 @@ def _load_celdas_de(conn: psycopg.Connection, horario_id: int) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def _parse_hora(valor: time | str | None) -> time | None:
+    """Normaliza "HH:MM:SS" del payload a `datetime.time` (como devuelve
+    psycopg y como produce el solver); si ya es `time` lo deja igual."""
+    if isinstance(valor, str):
+        partes = valor.split(":")
+        h = int(partes[0])
+        m = int(partes[1]) if len(partes) > 1 else 0
+        s = int(partes[2]) if len(partes) > 2 else 0
+        return time(h, m, s)
+    return valor
+
+
+def _recalcular_estado(conn: psycopg.Connection, horario_id: int) -> str:
+    """Recalcula y persiste el estado del horario según sus celdas actuales.
+
+    Reglas (espejo de la semántica del solver):
+      · Sin celdas                             → `borrador`.
+      · Con celdas y 0 violaciones             → `completo`.
+      · Con celdas y alguna violación          → `parcial`.
+
+    Corre `load_problem` + `validate_schedule` como `validar_horario`. Si no
+    hubiera configuración activa no se puede validar, así que se conserva un
+    estado prudente por conteo (`borrador` sin celdas, `parcial` con celdas)
+    en lugar de fallar la operación de edición que la invocó.
+    """
+    celdas = _load_celdas_de(conn, horario_id)
+    if not celdas:
+        estado = "borrador"
+    else:
+        problem, error = load_problem(conn, horario_id)
+        if error:
+            estado = "parcial"
+        else:
+            violaciones = validate_schedule(problem, celdas)
+            estado = "completo" if not violaciones else "parcial"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE horarios SET estado = %s WHERE id = %s",
+            (estado, horario_id),
+        )
+    return estado
+
+
 # ---------------------------------------------------------------------------
 # T-021 · Generar horario con el motor CSP
 # ---------------------------------------------------------------------------
@@ -135,7 +183,9 @@ def generar(
     try:
         with conn.transaction():
             if horario_id is not None:
-                # Regeneración: conservamos el id y refrescamos estado/etiqueta.
+                # Regeneración: conservamos el id, limpiamos celdas y volvemos
+                # a estado "borrador" (el trigger de completitud se dispara al
+                # transitar a "completo", DESPUÉS de reinsertar las celdas).
                 _load_horario(conn, horario_id)
                 with conn.cursor() as cur:
                     cur.execute(
@@ -143,17 +193,25 @@ def generar(
                         (horario_id,),
                     )
                     cur.execute(
-                        "UPDATE horarios SET nombre = %s, estado = %s WHERE id = %s",
-                        (nombre, resultado.estado, horario_id),
+                        "UPDATE horarios SET nombre = %s, estado = 'borrador' WHERE id = %s",
+                        (nombre, horario_id),
                     )
-                horario = _load_horario(conn, horario_id)
-                horario["estado"] = resultado.estado
             else:
                 config_id = problem.jornada.config_id
-                horario = _insert_horario(conn, config_id, nombre, resultado.estado)
+                horario = _insert_horario(conn, config_id, nombre, "borrador")
                 horario_id = horario["id"]
 
+            # Primero las celdas, luego el estado: el trigger sch_horario_validar
+            # valida completitud/intensidad/carga con las celdas ya presentes.
             celdas = _insert_celdas(conn, horario_id, resultado.celdas) if resultado.celdas else []
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE horarios SET estado = %s WHERE id = %s",
+                    (resultado.estado, horario_id),
+                )
+            horario = _load_horario(conn, horario_id)
+            horario["estado"] = resultado.estado
     except psycopg.Error as exc:
         # Los triggers del esquema (sch_celda_validar, sch_horario_validar)
         # también validan; si el solver generó algo inválido, se ve aquí.
@@ -172,6 +230,47 @@ def generar(
         "conflictos": resultado.conflictos,
         "avisos": resultado.avisos,
         "statistics": resultado.statistics,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Horario en blanco (inicio de la edición manual 100 % a mano)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/vacio", status_code=status.HTTP_201_CREATED)
+def crear_vacio(
+    payload: dict,
+    conn: psycopg.Connection = Depends(get_db),
+) -> dict:
+    """Crea un horario vacío (`estado='borrador'`, 0 celdas).
+
+    Body opcional: `{"nombre": ...}` (por defecto "Horario en blanco").
+    Requiere una configuración de jornada activa (409 si no la hay, igual que
+    `generar`). Devuelve la misma forma que `generar` con celdas vacías.
+    """
+    nombre = str(payload.get("nombre", "Horario en blanco"))
+
+    problem, error = load_problem(conn, None)
+    if error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
+
+    horario = _insert_horario(conn, problem.jornada.config_id, nombre, "borrador")
+
+    return {
+        "horario": horario,
+        "estado": "borrador",
+        "completo": False,
+        "celdas": [],
+        "conflictos": [],
+        "avisos": [],
+        "statistics": {
+            "variables": 0,
+            "asignadas": 0,
+            "fijas": 0,
+            "nodos_explorados": 0,
+            "tiempo_seg": 0.0,
+        },
     }
 
 
@@ -244,6 +343,7 @@ _PARAMETROS_MOVIMIENTO = (
     "bloque",
     "hora_inicio",
     "hora_fin",
+    "bloqueada",
 )
 
 
@@ -260,6 +360,8 @@ def editar_celda(
         (los campos no enviados conservan su valor actual).
       · Ningún `celda_id` → se crea una celda nueva con los campos dados.
       · `curso_id` es obligatorio y no cambia en un movimiento.
+      · `bloqueada` (opcional) → en un movimiento, fija (`true`) o suelta
+        (`false`) la celda sin cambiar su ubicación ni asignación.
 
     La validación simula la celda final contra el resto; si hay violaciones de
     choque/disponibilidad/salón/jornada se responde 409 sin guardar nada.
@@ -304,6 +406,11 @@ def editar_celda(
                     detail=f"Falta el campo `{k}` en la nueva celda.",
                 )
         otras = [c for c in celdas_actuales]
+
+    # El payload trae horas como "HH:MM:SS"; la validación y el INSERT usan
+    # objetos `time` (los mismos que psycopg devuelve y que produce el solver).
+    for k in ("hora_inicio", "hora_fin"):
+        propuesta[k] = _parse_hora(propuesta.get(k))
 
     # 1) Validación en vivo (sin tocar la BD).
     problem, error = load_problem(conn, horario_id)
@@ -381,8 +488,73 @@ def editar_celda(
         ) from exc
 
     advertencias = [v for v in violaciones if v["tipo"] == "carga_curso_incompleta"]
+    # 3) Estado del horario tras la mutación (se persiste en la BD).
+    estado = _recalcular_estado(conn, horario_id)
     return {
         "valido": True,
         "celda": dict(fila),
         "advertencias": advertencias,
+        "estado": estado,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Borrar una celda del horario (edición manual)
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/{horario_id}/cursos/{curso_id}/celdas")
+def vaciar_curso(
+    horario_id: int,
+    curso_id: int,
+    conn: psycopg.Connection = Depends(get_db),
+) -> dict:
+    """Elimina únicamente las celdas de un curso dentro del horario."""
+    _load_horario(conn, horario_id)
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM celdas WHERE horario_id = %s AND curso_id = %s RETURNING id",
+                (horario_id, curso_id),
+            )
+            eliminadas = len(cur.fetchall())
+        estado = _recalcular_estado(conn, horario_id)
+
+    return {
+        "eliminadas": eliminadas,
+        "horario_id": horario_id,
+        "curso_id": curso_id,
+        "estado": estado,
+    }
+
+
+@router.delete("/{horario_id}/celdas/{celda_id}")
+def borrar_celda(
+    horario_id: int,
+    celda_id: int,
+    conn: psycopg.Connection = Depends(get_db),
+) -> dict:
+    """Elimina una celda del horario (solo si le pertenece).
+
+    404 si la celda no existe o no pertenece al horario. Tras borrar, recalcula
+    y persiste el estado del horario (`_recalcular_estado`) y lo devuelve.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "DELETE FROM celdas WHERE id = %s AND horario_id = %s RETURNING *",
+            (celda_id, horario_id),
+        )
+        fila = cur.fetchone()
+    if fila is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Celda {celda_id} no encontrada en el horario {horario_id}.",
+        )
+
+    estado = _recalcular_estado(conn, horario_id)
+    return {
+        "eliminada": True,
+        "celda_id": celda_id,
+        "horario_id": horario_id,
+        "estado": estado,
     }

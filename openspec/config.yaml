@@ -1,0 +1,101 @@
+schema: spec-driven
+artifact_store: openspec
+engram: unavailable
+execution_mode: auto
+delivery_strategy: ask-on-risk
+review_budget_lines: 400
+strict_tdd: true
+
+context: |
+  Project: horarios-backend (FastAPI + Supabase/PostgreSQL generador de horarios).
+  Stack BE: Python 3.11+ (runtime venv .venv), FastAPI, pydantic/pydantic-settings,
+    psycopg 3 + psycopg-pool, python-dotenv, email-validator. Modular: app/routers,
+    app/models, app/scheduler (loader, intensity, solver, validation).
+  Stack FE (sibling product): Next.js 15, React 19, Tailwind v4, TypeScript
+    at ..\horarios-frontend. Build/typecheck: `npm run build`.
+  Data: PostgreSQL on Supabase. Schema in sql/schema.sql (triggers sch_celda_validar,
+    sch_horario_validar) and sql/seed.sql.
+  Testing: pytest suite in tests/ (12 green). Runner via venv python. No linter/type
+    checker/formatter configured in repo. Commits: conventional, no AI attribution.
+
+testing:
+  strict_tdd: true
+  detected: 2026-08-10
+
+  test_runner:
+    command: '& ".venv\Scripts\python.exe" -m pytest tests -q'
+    framework: pytest (cpython-314, pytest 9.1.1)
+
+  test_layers:
+    - layer: Unit
+      available: true
+      tool: pytest
+      files: [tests/test_intensity.py, tests/test_solver.py, tests/test_validation.py, tests/test_horarios_regeneracion.py]
+    - layer: Integration
+      available: true
+      tool: pytest + conftest fixtures (DB-backed)
+      note: 'tests/conftest.py provides shared fixtures; regeneracion test exercises router/DB behavior.'
+    - layer: E2E
+      available: false
+      tool: '—'
+
+  coverage:
+    available: false
+    command: '—'
+    note: No pytest-cov configured.
+
+  quality_tools:
+    - tool: Linter
+      available: false
+      command: '—'
+    - tool: Type checker
+      available: false
+      command: '—'
+    - tool: Formatter
+      available: false
+      command: '—'
+
+  build_command: '& ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt'
+  verify_command: '& ".venv\Scripts\python.exe" -m pytest tests -q'
+
+conventions:
+  venv: Use .venv\Scripts\python.exe for all Python invocations; do not rely on global python.
+  secrets: DATABASE_URL is a pydantic SecretStr; use settings.database_url.get_secret_value() in custom scripts.
+  git: Conventional commits; no Co-Authored-By or AI attribution.
+  scheduler_gotchas:
+    - 'Pool without row_factory: never add dict_row to app/db.py pool or _load_asignaciones/_load_disponibilidades reads (false curso_sin_materias).'
+    - 'Greedy deadline: reset solver._deadline = time.time() + GREEDY_TRIGGER_SEG before _rellenar_greedy() in solve().'
+    - 'Salon type: _valores_greedy MUST filter by salon tipo like _constructor_dominio (trigger sch_celda_validar rejects).'
+    - 'Regeneration: on horario_id existing, delete cells -> insert -> THEN transition to completo; state change before insert fails sch_horario_validar (0 cells).'
+    - 'Intensity grouping: always group by (materia_id, curso_id) for sch_horario_validar max_horas; grouping only by materia rejects valid horarios.'
+  domain: Jornada 6 bloques x 5 dias = 30 slots/curso; 6 cursos (6A-11A); 180 celdas target; estado completo, 0 conflictos, 0 avisos.
+
+rules:
+  proposal:
+    - Include rollback plan for risky schema/trigger changes.
+    - Note impact on sch_celda_validar / sch_horario_validar when touching sql/schema.sql.
+  specs:
+    - Use Given/When/Then for scenarios.
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
+    - Reference domain invariants from .opencode/skills/horarios-backend/SKILL.md.
+  design:
+    - Document scheduler flow impact (loader -> intensity -> solver -> validation).
+    - Flag any change to greedy/deadline, row_factory pool, or trigger order.
+  tasks:
+    - Group by phase, use hierarchical numbering.
+    - Keep tasks completable in one session.
+  apply:
+    guidelines:
+      - Follow existing patterns in app/routers and app/scheduler.
+      - Never add row_factory to db.py pool.
+      - Run pytest via '.venv\Scripts\python.exe -m pytest tests -q'.
+    tdd: true
+    test_command: '& ".venv\Scripts\python.exe" -m pytest tests -q'
+    build_command: '& ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt'
+  verify:
+    test_command: '& ".venv\Scripts\python.exe" -m pytest tests -q'
+    build_command: '& ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt'
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas to specs.
+    - Never delete or modify archived changes.

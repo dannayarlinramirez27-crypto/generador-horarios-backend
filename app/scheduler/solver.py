@@ -492,11 +492,18 @@ class _Solver:
     def _valores_greedy(self, v: _Var) -> list[tuple[int, int, int, int]]:
         """Dominio permisivo SOLO para el greedy T-029.
 
-        Se ignora el tipo de salón requerido por la materia: cualquier salón
-        sirve. Solo se exige que el docente esté asignado a la materia/curso y
-        que cubra el bloque, y que no haya choque duro (docente, salón, curso).
+        Se mantiene la exigencia del tipo de salón (aula para materias
+        normales, laboratorio/sala cuando la materia lo requiere) para que las
+        celdas generadas pasen el trigger `sch_celda_validar` de la BD. Se
+        relaja todo lo demás: solo se exige que el docente esté asignado a la
+        materia/curso y que cubra el bloque, y que no haya choque duro
+        (docente, salón, curso).
         """
         materia = self.problem.materias[v.materia_id]
+        if materia.requiere_salon:
+            salones = [s for s in self.problem.salones if s.tipo == materia.tipo_salon_requerido]
+        else:
+            salones = [s for s in self.problem.salones if s.tipo == "aula"]
         valores: list[tuple[int, int, int, int]] = []
         for doc in self.problem.docentes:
             if v.materia_id not in doc.materias or v.curso_id not in doc.cursos:
@@ -506,7 +513,7 @@ class _Solver:
                     continue
                 if not doc.cubre(sl):
                     continue
-                for s in self.problem.salones:
+                for s in salones:
                     valores.append((doc.id, s.id, sl.dia, sl.bloque))
         return valores
 
@@ -713,6 +720,11 @@ def solve(problem: Problem) -> ScheduleResult:
 
     if not solver._completo():
         # Fallback greedy: rellena desde el mejor parcial con 0 conflictos duros.
+        # IMPORTANTE: el greedy necesita su PROPIA ventana de tiempo. `_deadline`
+        # quedó vencido tras el backtracking (compartía el mismo `_deadline`);
+        # si no lo reiniciamos, `_rellenar_greedy` rompe en la primera iteración
+        # y entrega el parcial del backtracking sin completar la grilla.
+        solver._deadline = time.time() + GREEDY_TRIGGER_SEG
         solver._rellenar_greedy()
 
     if truncado_por_tiempo:

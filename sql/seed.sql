@@ -29,9 +29,17 @@ INSERT INTO materias (nombre, categoria, min_horas, max_horas, requiere_salon, t
 ON CONFLICT (nombre) DO NOTHING;
 
 -- 4. Salones
+-- Capacidad para 6 cursos de 30 h (180 bloques):
+--   · 5 aulas  × 30 slots = 150  ≥ 132 bloques de aula requeridos (5 materias × 6 cursos)
+--   · 2 labs   × 30 slots = 60   ≥  48 bloques de laboratorio requeridos (Ciencias 5h + Info 3h)
+--   · 1 sala (multiuso, reservada) — el trigger sch_celda_validar exige 'aula'
+--     para materias normales, por lo que 'sala' no es apta para clases regulares.
 INSERT INTO salones (nombre, tipo, capacidad, activo) VALUES
     ('Aula 102',        'aula',        30, true),
     ('Aula 103',        'aula',        30, true),
+    ('Aula 104',        'aula',        30, true),
+    ('Aula 105',        'aula',        30, true),
+    ('Aula 106',        'aula',        30, true),
     ('Lab. Ciencias',   'laboratorio', 25, true),
     ('Lab. Informática','laboratorio', 25, true),
     ('Sala Múltiple',   'sala',        40, true)

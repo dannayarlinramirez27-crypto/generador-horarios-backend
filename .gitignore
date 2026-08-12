@@ -14,3 +14,6 @@ venv/
 
 # Obsidian (carpeta interna del vault, no se versiona)
 .obsidian/
+
+# Registro de skills (índice local de delegación)
+.atl/

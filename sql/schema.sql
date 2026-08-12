@@ -280,11 +280,13 @@ BEGIN
     END IF;
 
     -- §5.5 / §5.2 Intensidad por materia dentro de su [min_horas, max_horas].
+    -- La intensidad es POR CURSO: una materia puede repetirse en varios cursos
+    -- del mismo horario, y cada curso individual debe quedar dentro del rango.
     IF EXISTS (
         SELECT 1
           FROM materias m
           JOIN celdas c ON c.materia_id = m.id AND c.horario_id = NEW.id
-         GROUP BY m.id, m.nombre, m.min_horas, m.max_horas
+         GROUP BY m.id, m.nombre, m.min_horas, m.max_horas, c.curso_id
         HAVING SUM(EXTRACT(EPOCH FROM (c.hora_fin - c.hora_inicio)) / 60)
                NOT BETWEEN m.min_horas * 60 AND m.max_horas * 60
     ) THEN
