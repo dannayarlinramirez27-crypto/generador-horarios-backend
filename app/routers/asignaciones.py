@@ -10,6 +10,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.models.asignaciones import (
     DocenteMateriaCreate,
@@ -19,7 +20,11 @@ from app.models.asignaciones import (
 )
 from app.routers._common import raise_db_error
 
-router = APIRouter(prefix="/asignaciones", tags=["Asignaciones"])
+router = APIRouter(
+    prefix="/asignaciones",
+    tags=["Asignaciones"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 def _docente_existe(conn, docente_id: int) -> None:

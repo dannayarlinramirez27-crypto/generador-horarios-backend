@@ -7,11 +7,16 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.models.materias import MateriaCreate, MateriaUpdate, MateriaOut
 from app.routers._common import build_update_statement, raise_db_error
 
-router = APIRouter(prefix="/materias", tags=["Materias"])
+router = APIRouter(
+    prefix="/materias",
+    tags=["Materias"],
+    dependencies=[Depends(get_current_user)],
+)
 
 TABLE = "materias"
 

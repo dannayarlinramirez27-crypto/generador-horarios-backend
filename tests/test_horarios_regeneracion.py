@@ -53,6 +53,7 @@ class _ConnFake:
             "nombre": _NOMBRE,
             "configuracion_id": 1,
             "estado": "borrador",
+            "usuario_id": "test-user-uuid",
         }
         self.filas: list[dict] = [self.fila]
 
@@ -114,7 +115,11 @@ def test_generar_regeneracion_inserta_celdas_antes_del_estado_completo(
     )
     monkeypatch.setattr(horarios_router, "solve", lambda _problem: _resultado_completo())
 
-    respuesta = horarios_router.generar({"nombre": _NOMBRE, "horario_id": _HORARIO_ID}, conn)
+    respuesta = horarios_router.generar(
+        {"nombre": _NOMBRE, "horario_id": _HORARIO_ID},
+        conn,
+        {"sub": "test-user-uuid"},
+    )
 
     operaciones = list(zip(conn.sqls, conn.params))
 

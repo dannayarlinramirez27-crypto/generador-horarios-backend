@@ -10,6 +10,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.models.docentes import DocenteCreate, DocenteUpdate, DocenteOut
 from app.models.disponibilidades import (
@@ -18,7 +19,11 @@ from app.models.disponibilidades import (
 )
 from app.routers._common import build_update_statement, raise_db_error
 
-router = APIRouter(prefix="/docentes", tags=["Docentes"])
+router = APIRouter(
+    prefix="/docentes",
+    tags=["Docentes"],
+    dependencies=[Depends(get_current_user)],
+)
 
 DOC_TABLE = "docentes"
 DISP_TABLE = "disponibilidades"

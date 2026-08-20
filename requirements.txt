@@ -13,3 +13,7 @@ email-validator
 # Compatible con Python 3.14 y PostgreSQL >= 14.
 psycopg[binary]
 psycopg-pool
+
+# --- Autenticación (T-039) ---
+# Verificación de JWT de Supabase Auth (RS256 + JWKS).
+PyJWT

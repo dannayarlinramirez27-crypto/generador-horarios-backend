@@ -18,12 +18,17 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.models.celdas import CeldaOut
 from app.models.horarios import HorarioOut
 from app.scheduler import load_problem, solve, validate_cell_move, validate_schedule
 
-router = APIRouter(prefix="/horarios", tags=["Horarios"])
+router = APIRouter(
+    prefix="/horarios",
+    tags=["Horarios"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -36,15 +41,16 @@ def _insert_horario(
     configuracion_id: int,
     nombre: str,
     estado: str,
+    usuario_id: str,
 ) -> dict:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            INSERT INTO horarios (configuracion_id, nombre, estado)
-            VALUES (%s, %s, %s)
+            INSERT INTO horarios (configuracion_id, nombre, estado, usuario_id)
+            VALUES (%s, %s, %s, %s)
             RETURNING *
             """,
-            (configuracion_id, nombre, estado),
+            (configuracion_id, nombre, estado, usuario_id),
         )
         row = cur.fetchone()
     return dict(row)
@@ -82,9 +88,13 @@ def _insert_celdas(
     return filas
 
 
-def _load_horario(conn: psycopg.Connection, horario_id: int) -> dict:
+def _load_horario(conn: psycopg.Connection, horario_id: int, usuario_id: str) -> dict:
+    """Devuelve un horario solo si pertenece al usuario (404 en caso contrario)."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM horarios WHERE id = %s", (horario_id,))
+        cur.execute(
+            "SELECT * FROM horarios WHERE id = %s AND usuario_id = %s",
+            (horario_id, usuario_id),
+        )
         row = cur.fetchone()
     if row is None:
         raise HTTPException(
@@ -156,6 +166,7 @@ def _recalcular_estado(conn: psycopg.Connection, horario_id: int) -> str:
 def generar(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Ejecuta el motor CSP y persiste horario + celdas en una transacción.
 
@@ -165,6 +176,7 @@ def generar(
         conservando sus celdas `bloqueada = true` (inmutables) y respetando su
         configuración; en caso contrario usa la configuración activa.
     """
+    usuario_id = usuario["sub"]
     nombre = str(payload.get("nombre", "Horario"))
     horario_id = payload.get("horario_id")
 
@@ -186,7 +198,7 @@ def generar(
                 # Regeneración: conservamos el id, limpiamos celdas y volvemos
                 # a estado "borrador" (el trigger de completitud se dispara al
                 # transitar a "completo", DESPUÉS de reinsertar las celdas).
-                _load_horario(conn, horario_id)
+                _load_horario(conn, horario_id, usuario_id)
                 with conn.cursor() as cur:
                     cur.execute(
                         "DELETE FROM celdas WHERE horario_id = %s",
@@ -198,7 +210,7 @@ def generar(
                     )
             else:
                 config_id = problem.jornada.config_id
-                horario = _insert_horario(conn, config_id, nombre, "borrador")
+                horario = _insert_horario(conn, config_id, nombre, "borrador", usuario_id)
                 horario_id = horario["id"]
 
             # Primero las celdas, luego el estado: el trigger sch_horario_validar
@@ -210,7 +222,7 @@ def generar(
                     "UPDATE horarios SET estado = %s WHERE id = %s",
                     (resultado.estado, horario_id),
                 )
-            horario = _load_horario(conn, horario_id)
+            horario = _load_horario(conn, horario_id, usuario_id)
             horario["estado"] = resultado.estado
     except psycopg.Error as exc:
         # Los triggers del esquema (sch_celda_validar, sch_horario_validar)
@@ -242,6 +254,7 @@ def generar(
 def crear_vacio(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Crea un horario vacío (`estado='borrador'`, 0 celdas).
 
@@ -249,13 +262,14 @@ def crear_vacio(
     Requiere una configuración de jornada activa (409 si no la hay, igual que
     `generar`). Devuelve la misma forma que `generar` con celdas vacías.
     """
+    usuario_id = usuario["sub"]
     nombre = str(payload.get("nombre", "Horario en blanco"))
 
     problem, error = load_problem(conn, None)
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
 
-    horario = _insert_horario(conn, problem.jornada.config_id, nombre, "borrador")
+    horario = _insert_horario(conn, problem.jornada.config_id, nombre, "borrador", usuario_id)
 
     return {
         "horario": horario,
@@ -282,10 +296,15 @@ def crear_vacio(
 @router.get("", response_model=list[HorarioOut])
 def list_horarios(
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """Lista los horarios guardados (más recientes primero)."""
+    """Lista los horarios del usuario actual (más recientes primero)."""
+    usuario_id = usuario["sub"]
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM horarios ORDER BY id DESC")
+        cur.execute(
+            "SELECT * FROM horarios WHERE usuario_id = %s ORDER BY id DESC",
+            (usuario_id,),
+        )
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -293,9 +312,11 @@ def list_horarios(
 def get_horario(
     horario_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
-    """Devuelve un horario con todas sus celdas."""
-    horario = _load_horario(conn, horario_id)
+    """Devuelve un horario con todas sus celdas (solo si es del usuario)."""
+    usuario_id = usuario["sub"]
+    horario = _load_horario(conn, horario_id, usuario_id)
     celdas = _load_celdas_de(conn, horario_id)
     return {"horario": horario, "celdas": celdas}
 
@@ -309,14 +330,16 @@ def get_horario(
 def validar_horario(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Verifica todas las restricciones de un horario y las reporta.
 
     Body: `{"horario_id": <id>}`. Devuelve `violaciones` (cada una con tipo y
     mensaje). Si la lista está vacía → horario válido.
     """
+    usuario_id = usuario["sub"]
     horario_id = payload.get("horario_id")
-    _load_horario(conn, horario_id)
+    _load_horario(conn, horario_id, usuario_id)
     celdas = _load_celdas_de(conn, horario_id)
 
     problem, error = load_problem(conn, horario_id)
@@ -352,6 +375,7 @@ def editar_celda(
     horario_id: int,
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Agrega o mueve una celda validando en tiempo real.
 
@@ -366,6 +390,10 @@ def editar_celda(
     La validación simula la celda final contra el resto; si hay violaciones de
     choque/disponibilidad/salón/jornada se responde 409 sin guardar nada.
     """
+    usuario_id = usuario["sub"]
+    # Verificar ownership del horario antes de cualquier operación.
+    _load_horario(conn, horario_id, usuario_id)
+
     celda_id = payload.get("celda_id")
     curso_id = payload.get("curso_id")
     if not curso_id:
@@ -508,9 +536,11 @@ def vaciar_curso(
     horario_id: int,
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Elimina únicamente las celdas de un curso dentro del horario."""
-    _load_horario(conn, horario_id)
+    usuario_id = usuario["sub"]
+    _load_horario(conn, horario_id, usuario_id)
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
@@ -533,12 +563,15 @@ def borrar_celda(
     horario_id: int,
     celda_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Elimina una celda del horario (solo si le pertenece).
 
     404 si la celda no existe o no pertenece al horario. Tras borrar, recalcula
     y persiste el estado del horario (`_recalcular_estado`) y lo devuelve.
     """
+    usuario_id = usuario["sub"]
+    _load_horario(conn, horario_id, usuario_id)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "DELETE FROM celdas WHERE id = %s AND horario_id = %s RETURNING *",

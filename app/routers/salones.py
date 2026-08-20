@@ -4,11 +4,16 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.models.salones import SalonCreate, SalonUpdate, SalonOut
 from app.routers._common import build_update_statement, raise_db_error
 
-router = APIRouter(prefix="/salones", tags=["Salones"])
+router = APIRouter(
+    prefix="/salones",
+    tags=["Salones"],
+    dependencies=[Depends(get_current_user)],
+)
 
 TABLE = "salones"
 

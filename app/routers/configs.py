@@ -10,11 +10,16 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.models.configs import ConfigCreate, ConfigUpdate, ConfigOut
 from app.routers._common import build_update_statement, raise_db_error
 
-router = APIRouter(prefix="/configs", tags=["Configuraciones"])
+router = APIRouter(
+    prefix="/configs",
+    tags=["Configuraciones"],
+    dependencies=[Depends(get_current_user)],
+)
 
 TABLE = "configs"
 
