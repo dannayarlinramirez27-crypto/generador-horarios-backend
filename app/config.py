@@ -30,11 +30,19 @@ class Settings(BaseSettings):
 
     # --- CORS: orígenes permitidos, separados por coma ---
     cors_origins: str = "http://localhost:3000"
+    # Patrón regex opcional para orígenes dinámicos (ej. previews de Vercel).
+    # Vacío = desactivado. Ej: "https://.*\.vercel\.app"
+    cors_origin_regex: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:
         """Lista de orígenes CORS (a partir del string plano)."""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def cors_origin_regex_value(self) -> str | None:
+        """Regex de CORS como string o None si no está definida."""
+        return self.cors_origin_regex.strip() or None
 
     @property
     def database_url_value(self) -> str:

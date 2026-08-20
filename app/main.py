@@ -28,12 +28,15 @@ app = FastAPI(
 )
 
 # ----------------------------------------------------------------------------
-# CORS: permitimos únicamente el origen del frontend Next.js (y su variante
-# localhost). En producción se ajusta vía CORS_ORIGINS en `.env`.
+# CORS: permitimos el origen del frontend Next.js (localhost) y, en producción,
+# el dominio de Vercel. Los orígenes explícitos se ajustan vía CORS_ORIGINS;
+# el patrón opcional CORS_ORIGIN_REGEX habilita los previews dinámicos de
+# Vercel (*.vercel.app) sin necesidad de listarlos uno a uno.
 # ----------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    allow_origin_regex=settings.cors_origin_regex_value,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
