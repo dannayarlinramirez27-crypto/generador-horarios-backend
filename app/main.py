@@ -28,15 +28,14 @@ app = FastAPI(
 )
 
 # ----------------------------------------------------------------------------
-# CORS: permitimos el origen del frontend Next.js (localhost) y, en producción,
-# el dominio de Vercel. Los orígenes explícitos se ajustan vía CORS_ORIGINS;
-# el patrón opcional CORS_ORIGIN_REGEX habilita los previews dinámicos de
-# Vercel (*.vercel.app) sin necesidad de listarlos uno a uno.
+# CORS: aceptamos cualquier origen (los previews de Vercel cambian de
+# subdominio en cada deploy). La seguridad la aporta el JWT + RLS, no CORS.
+# Starlette con allow_origins=["*"] + allow_credentials=True hace echo del
+# Origin del cliente (no envía "*" literal), cumpliendo la spec CORS.
 # ----------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    allow_origin_regex=settings.cors_origin_regex_value,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,6 +56,19 @@ async def psycopg_exception_handler(
 ) -> JSONResponse:
     status_code, detail = db_error_to_response(exc)
     return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+# Handler de último recurso: captura cualquier excepción no manejada para
+# que la respuesta sea JSON con CORS headers (el middleware los añade después).
+# Sin esto, un 500 crudo hace que el navegador reporte un falso error de CORS.
+@app.exception_handler(Exception)
+async def general_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Error interno del servidor: {str(exc)}"},
+    )
 
 
 # Routers bajo el prefijo /api/v1

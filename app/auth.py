@@ -3,7 +3,7 @@
 Este módulo proporciona la dependencia `get_current_user` que:
 
 1. Extrae el token Bearer del header `Authorization`.
-2. Verifica la firma del JWT contra las JWKS públicas de Supabase (RS256).
+2. Verifica la firma del JWT contra las JWKS públicas de Supabase (ES256/RS256).
 3. Valida `iss` (issuer) y `aud` (audience = "authenticated").
 4. Devuelve el UUID del usuario (`sub`) y el email.
 
@@ -40,7 +40,9 @@ def _get_jwks_client() -> PyJWKClient:
     if _jwks_client is None or (now - _jwks_fetched_at) > _JWKS_TTL:
         supabase_url = get_settings().supabase_url_value.rstrip("/")
         jwks_uri = f"{supabase_url}/auth/v1/.well-known/jwks.json"
-        _jwks_client = PyJWKClient(jwks_uri)
+        # Timeout de 10s: si Render no puede alcanzar Supabase, fallamos
+        # rápido con un 503 en vez de colgarse la petición.
+        _jwks_client = PyJWKClient(jwks_uri, timeout=10)
         _jwks_fetched_at = now
     return _jwks_client
 
@@ -72,6 +74,13 @@ def _verify_token(token: str) -> dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token inválido: {exc}",
+        )
+    except Exception as exc:
+        # Error de red al fetchear las JWKS, o cualquier otro problema
+        # inesperado: 503 para distinguirlo de un token inválido (401).
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"No se pudo verificar el token contra Supabase: {exc}",
         )
     return payload
 
