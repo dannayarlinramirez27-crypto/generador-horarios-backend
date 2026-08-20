@@ -49,14 +49,17 @@ def _verify_token(token: str) -> dict[str, Any]:
     """Verifica un JWT de Supabase y devuelve sus claims."""
     settings = get_settings()
     supabase_url = settings.supabase_url_value.rstrip("/")
-    expected_issuer = f"{supabase_url}/auth/v1/"
+    # El issuer real de Supabase no lleva slash final (ver .well-known/openid-configuration).
+    expected_issuer = f"{supabase_url}/auth/v1"
 
     try:
         signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
             signing_key.key,
-            algorithms=["RS256"],
+            # Supabase puede firmar con ES256, RS256 o HS256 según el proyecto.
+            # El algoritmo concreto se infiere del `kid` de las JWKS.
+            algorithms=["ES256", "RS256"],
             audience="authenticated",
             issuer=expected_issuer,
         )
