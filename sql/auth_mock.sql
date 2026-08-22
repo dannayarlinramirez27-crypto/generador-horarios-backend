@@ -1,7 +1,16 @@
 -- Mock del schema auth de Supabase para tests en CI (Postgres vanilla).
--- Supabase tiene este schema pre-instalado; en CI local lo creamos.
+-- Supabase tiene este schema y estos roles pre-instalados; en CI local los creamos.
 -- auth.uid() lee el sub del JWT actual (request.jwt.claims).
 -- auth.users es una tabla simple que simula los usuarios de Supabase Auth.
+
+-- Roles de Supabase (anon = sin login, authenticated = con JWT valido)
+DO $$ BEGIN
+    CREATE ROLE anon NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE ROLE authenticated NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE SCHEMA IF NOT EXISTS auth;
 
