@@ -15,5 +15,7 @@ psycopg[binary]
 psycopg-pool
 
 # --- Autenticación (T-039) ---
-# Verificación de JWT de Supabase Auth (RS256 + JWKS).
+# Verificación de JWT de Supabase Auth (ES256 + JWKS).
+# PyJWT requiere `cryptography` para algoritmos EC (ES256) y RSA (RS256).
 PyJWT
+cryptography
