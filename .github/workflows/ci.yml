@@ -85,6 +85,7 @@ jobs:
 
       - name: Initialize database schema
         run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/auth_mock.sql
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/schema.sql
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/rls.sql
 
