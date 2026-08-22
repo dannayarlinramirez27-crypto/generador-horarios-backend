@@ -88,6 +88,7 @@ jobs:
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/auth_mock.sql
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/schema.sql
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/rls.sql
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -f sql/ci_grants.sql
 
       - name: Run SQL integration tests
         run: |

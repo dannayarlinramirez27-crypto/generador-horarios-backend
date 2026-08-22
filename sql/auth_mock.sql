@@ -51,10 +51,3 @@ LANGUAGE sql STABLE AS $$
         '00000000-0000-0000-0000-000000000000'::uuid
     );
 $$;
-
--- Grants que Supabase configura automaticamente pero que no existen
--- en Postgres vanilla. Sin estos, los roles anon/authenticated no pueden
--- acceder a las tablas y los tests RLS fallan con "permission denied".
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA auth TO anon, authenticated;
