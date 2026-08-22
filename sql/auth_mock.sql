@@ -21,11 +21,15 @@ CREATE TABLE IF NOT EXISTS auth.users (
     created_at timestamptz DEFAULT now()
 );
 
--- auth.uid(): devuelve el UUID del usuario actual desde request.jwt.claims
+-- auth.uid(): devuelve el UUID del usuario actual desde request.jwt.claims.
+-- En CI sin JWT, devuelve un UUID fijo para que DEFAULT auth.uid() no sea NULL.
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
 LANGUAGE sql STABLE AS $$
-    SELECT NULLIF(
-        (current_setting('request.jwt.claims', true)::json ->> 'sub'),
-        ''
-    )::uuid;
+    SELECT COALESCE(
+        NULLIF(
+            (current_setting('request.jwt.claims', true)::json ->> 'sub'),
+            ''
+        )::uuid,
+        '00000000-0000-0000-0000-000000000000'::uuid
+    );
 $$;
