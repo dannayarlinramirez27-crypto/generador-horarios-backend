@@ -14,16 +14,29 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE SCHEMA IF NOT EXISTS auth;
 
--- Tabla de usuarios (simplificada)
+-- Tabla de usuarios (simula auth.users de Supabase con las columnas
+-- que usan los tests de RLS)
 CREATE TABLE IF NOT EXISTS auth.users (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    instance_id uuid,
+    aud text,
+    role text,
     email text,
-    created_at timestamptz DEFAULT now()
+    email_confirmed_at timestamptz,
+    raw_app_meta_data jsonb DEFAULT '{}'::jsonb,
+    raw_user_meta_data jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now()
 );
 
 -- Usuario por defecto para CI (auth.uid() lo usa cuando no hay JWT)
-INSERT INTO auth.users (id, email)
-VALUES ('00000000-0000-0000-0000-000000000000', 'ci@localhost')
+INSERT INTO auth.users (id, instance_id, aud, role, email,
+                        email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+                        created_at, updated_at)
+VALUES ('00000000-0000-0000-0000-000000000000',
+        '00000000-0000-0000-0000-000000000000',
+        'authenticated', 'authenticated', 'ci@localhost',
+        now(), '{}'::jsonb, '{}'::jsonb, now(), now())
 ON CONFLICT (id) DO NOTHING;
 
 -- auth.uid(): devuelve el UUID del usuario actual desde request.jwt.claims.
