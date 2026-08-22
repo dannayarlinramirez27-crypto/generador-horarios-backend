@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS auth.users (
     created_at timestamptz DEFAULT now()
 );
 
+-- Usuario por defecto para CI (auth.uid() lo usa cuando no hay JWT)
+INSERT INTO auth.users (id, email)
+VALUES ('00000000-0000-0000-0000-000000000000', 'ci@localhost')
+ON CONFLICT (id) DO NOTHING;
+
 -- auth.uid(): devuelve el UUID del usuario actual desde request.jwt.claims.
 -- En CI sin JWT, devuelve un UUID fijo para que DEFAULT auth.uid() no sea NULL.
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
