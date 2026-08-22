@@ -43,7 +43,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest tests/test_solver.py tests/test_intensity.py tests/test_validation.py tests/test_horarios_regeneracion.py -v --tb=short
+          PYTHONPATH=. pytest tests/test_solver.py tests/test_intensity.py tests/test_validation.py tests/test_horarios_regeneracion.py -v --tb=short
 
   # ─────────────────────────────────────────────────────────────
   # Tests de integración SQL (necesitan DATABASE_URL)
@@ -81,4 +81,4 @@ jobs:
       - name: Run SQL integration tests
         if: ${{ env.DATABASE_URL != '' }}
         run: |
-          pytest tests/test_sql_integration.py -v --tb=short
+          PYTHONPATH=. pytest tests/test_sql_integration.py -v --tb=short
