@@ -18,7 +18,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.celdas import CeldaOut
 from app.models.horarios import HorarioOut
@@ -29,6 +29,10 @@ router = APIRouter(
     tags=["Horarios"],
     dependencies=[Depends(get_current_user)],
 )
+
+# Roles permitidos por operación
+ADMIN_ONLY = ["admin"]
+READ_ROLES = ["admin", "docente", "estudiante"]
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +166,7 @@ def _recalcular_estado(conn: psycopg.Connection, horario_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/generar", status_code=status.HTTP_201_CREATED)
+@router.post("/generar", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def generar(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
@@ -250,7 +254,7 @@ def generar(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/vacio", status_code=status.HTTP_201_CREATED)
+@router.post("/vacio", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def crear_vacio(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
@@ -293,7 +297,7 @@ def crear_vacio(
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[HorarioOut])
+@router.get("", response_model=list[HorarioOut], dependencies=[Depends(require_roles(READ_ROLES))])
 def list_horarios(
     conn: psycopg.Connection = Depends(get_db),
     usuario: dict = Depends(get_current_user),
@@ -308,7 +312,7 @@ def list_horarios(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/{horario_id}")
+@router.get("/{horario_id}", dependencies=[Depends(require_roles(READ_ROLES))])
 def get_horario(
     horario_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -326,7 +330,7 @@ def get_horario(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/validar")
+@router.post("/validar", dependencies=[Depends(require_roles(READ_ROLES))])
 def validar_horario(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
@@ -370,7 +374,7 @@ _PARAMETROS_MOVIMIENTO = (
 )
 
 
-@router.post("/{horario_id}/editar")
+@router.post("/{horario_id}/editar", dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def editar_celda(
     horario_id: int,
     payload: dict,
@@ -531,7 +535,7 @@ def editar_celda(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/{horario_id}/cursos/{curso_id}/celdas")
+@router.delete("/{horario_id}/cursos/{curso_id}/celdas", dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def vaciar_curso(
     horario_id: int,
     curso_id: int,
@@ -558,7 +562,7 @@ def vaciar_curso(
     }
 
 
-@router.delete("/{horario_id}/celdas/{celda_id}")
+@router.delete("/{horario_id}/celdas/{celda_id}", dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def borrar_celda(
     horario_id: int,
     celda_id: int,

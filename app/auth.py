@@ -11,6 +11,13 @@ Si no hay token o es inválido, responde 401.
 
 Las JWKS se cachean en memoria (TTL 1 h) para evitar una petición HTTP
 por cada request.
+
+RBAC (Role-Based Access Control):
+- `require_roles(allowed_roles)`: dependencia que valida el token y extrae el rol.
+- Roles del sistema:
+  - "admin": Acceso total (crear, editar, generar y ver horarios).
+  - "docente": Solo lectura de los horarios donde esté asignado.
+  - "estudiante": Solo lectura del horario perteneciente a su curso.
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ import time
 from typing import Any
 
 import jwt
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from jwt import PyJWKClient
 
 from app.config import get_settings
@@ -109,3 +116,57 @@ def get_current_user(
         )
     token = authorization.removeprefix("Bearer ").strip()
     return _verify_token(token)
+
+
+def _extract_role(claims: dict[str, Any]) -> str:
+    """Extrae el rol del usuario desde los claims del JWT de Supabase.
+
+    Busca en orden de prioridad:
+    1. `user_metadata.role` (custom claims definidos al registrar usuario)
+    2. `app_metadata.role` (claims administrativos de Supabase)
+    3. `role` (claim personalizado directo)
+    4. Por defecto: "estudiante" (rol menos privilegiado)
+    """
+    # user_metadata: claims que el usuario puede modificar (ej. en signup)
+    user_meta = claims.get("user_metadata", {})
+    if isinstance(user_meta, dict) and user_meta.get("role"):
+        return str(user_meta["role"])
+
+    # app_metadata: claims que solo admins de Supabase pueden modificar
+    app_meta = claims.get("app_metadata", {})
+    if isinstance(app_meta, dict) and app_meta.get("role"):
+        return str(app_meta["role"])
+
+    # Claim directo 'role' si existe
+    if claims.get("role"):
+        return str(claims["role"])
+
+    # Default: rol menos privilegiado
+    return "estudiante"
+
+
+def get_current_user_role(
+    usuario: dict[str, Any] = Depends(get_current_user),
+) -> str:
+    """Dependencia que devuelve el rol del usuario autenticado."""
+    return _extract_role(usuario)
+
+
+def require_roles(allowed_roles: list[str]):
+    """Dependencia de fábrica que valida el token y exige uno de los roles permitidos.
+
+    Uso:
+        @router.post("/generar", dependencies=[Depends(require_roles(["admin"]))])
+        def generar(...):
+
+    Lanza 403 si el usuario autenticado no tiene ninguno de los roles permitidos.
+    """
+    def _check_role(usuario: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+        role = _extract_role(usuario)
+        if role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Acceso denegado: se requiere uno de los roles {allowed_roles}, tienes '{role}'.",
+            )
+        return usuario
+    return _check_role

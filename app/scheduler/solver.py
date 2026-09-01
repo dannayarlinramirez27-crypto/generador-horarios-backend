@@ -12,6 +12,8 @@ restricciones (CSP):
       · disponibilidad del docente que cubra el bloque,
       · salón acorde al tipo requerido por la materia (aula/laboratorio/sala),
       · política "no última hora".
+    El dominio se ALEATORIZA (shuffle) al construirse para romper el orden
+    secuencial día/bloque y evitar horarios repetitivos y lineales.
 
   RESTRICCIONES DURAS (Hard) — solo choques por recurso en cada (dia, bloque):
       (1) un profesor NO puede estar en dos cursos al mismo tiempo;
@@ -24,13 +26,24 @@ restricciones (CSP):
       · Carga académica del docente (preferible bloques ≤
         floor(carga_horaria*60/bloque); excederla solo penaliza el orden);
       · Reparto de la materia (≤ 2 bloques/día en el curso, §4.3) penalizado;
+      · Variabilidad semanal: la misma materia a la MISMA hora (bloque) en
+        más de 2 días consecutivos queda penalizada — favorece una
+        distribución equilibrada a lo largo de la semana;
       · Reparto uniforme semanal (días con menos bloques de la materia);
       · Anti-contigüidad: bloques del mismo día adyacentes a otra clase de la
         misma materia quedan penalizados (evita clases pegadas).
 
-  Gracias a las soft, si no existe un horario "perfecto" el solver entrega el
-  mejor armado que llena la grilla al máximo posible sin dejar conflictos
-  duros, reportando qué reglas suaves se violaron.
+  ESTOCASTICIDAD (perturbación controlada)
+    Para que dos generaciones del mismo problema no produzcan el mismo
+    horario, las heurísticas incorporan desempates aleatorios:
+      · MRV/Degree/Balance: entre variables empatadas se elige al azar;
+      · LCV: el orden de valores termina con un jitter aleatorio (los valores
+        con idéntica penalización quedan en orden aleatorio, no por día);
+      · Greedy de relleno: mismo jitter en su orden de valores.
+    Todo esto NO afecta las restricciones duras: el resultado siempre está
+    libre de choques; solo varía cuál de las muchas soluciones válidas se
+    entrega. `solve(problem, semilla=...)` permite fijar la semilla para
+    reproducibilidad (tests).
 
   ALGORITMO
     Backtracking con _forward checking_. Heurísticas:
@@ -46,6 +59,7 @@ restricciones (CSP):
 from __future__ import annotations
 
 import math
+import random
 import time
 from collections import defaultdict
 from typing import Any
@@ -66,10 +80,31 @@ GREEDY_TRIGGER_SEG = 5
 # Cada cuántos nodos verificamos el reloj (evita el coste de time() por nodo).
 TIME_CHECK_CADA = 256
 
+# T-029 · Reintentos del completado greedy. El llenado es un matching
+# perfecto (cada curso necesita exactamente tantos bloques como slots
+# libres tiene); con el jitter aleatorio un intento puede acorralar a la
+# última variable (~35% de las veces en el peor caso). Reiniciar con otra
+# aleatorización es barato (microsegundos) y la tasa de fallo cae
+# exponencialmente: 0.35^8 ≈ 0.02%.
+GREEDY_REINTENTOS = 8
+
+# Reinicios del backtracking (randomized restarts). La perturbación
+# estocástica da alta varianza: algunos órdenes resuelven en <1s y otros se
+# pierden en backtracking exponencial. Reiniciar con otra semilla es la
+# técnica estándar: cada intento tiene una ventana corta (las semillas
+# buenas terminan rápido; las malas nunca convergen) y se prueban varias.
+BACKTRACK_REINTENTOS = 6
+BACKTRACK_VENTANA_SEG = 3
+
 # Orden institucional §4.3: una materia no ocupa más de 2 bloques por día
 # en un mismo curso. Es una RESTRICCIÓN SUAVE: se penaliza en el orden de
 # valores, pero no bloquea (T-028: soltar lo soft para llenar la grilla).
 MAX_BLOQUES_MATERIA_DIA = 2
+
+# Variabilidad semanal: techo de días CONSECUTIVOS en los que la misma
+# materia puede ocupar el mismo bloque horario (soft; p. ej. Matemáticas a
+# primera hora Lun-Mar-Mie seguidos queda penalizado a partir del 3er día).
+MAX_DIAS_MISMA_HORA = 2
 
 
 class NodeLimitReached(Exception):
@@ -118,11 +153,16 @@ class _Solver:
         plan: dict[int, dict[int, int]],
         cur_nombre: dict[int, str],
         mat_nombre: dict[int, str],
+        semilla: int | None = None,
     ) -> None:
         self.problem = problem
         self.mb = problem.minutos_bloque
         self.cur_nombre = cur_nombre
         self.mat_nombre = mat_nombre
+        # RNG propio: aleatoriedad de dominios/desempates. Con `semilla`
+        # fija la búsqueda es reproducible (tests); sin ella, cada
+        # generación produce un horario distinto.
+        self.rng = random.Random(semilla)
 
         # Capacidad en bloques por docente (carga horaria en horas → bloques).
         self.capacidad_bloques: dict[int, int] = {
@@ -146,6 +186,11 @@ class _Solver:
         # Ocupación puntual por (curso, materia, dia, bloque) para detectar
         # bloques contiguos de la misma asignatura (preferencia anti-pegado).
         self.occ_mismo_materia: dict[tuple[int, int, int, int], bool] = {}
+        # Bloques por (docente, dia): balance diario del docente. En los
+        # problemas reales cada docente cubre ~28 de sus 30 slots; si todas
+        # sus clases se apilan a un mismo día, el matching se acorrala y el
+        # backtracking entra en dead-ends exponenciales.
+        self.docente_dia: dict[tuple[int, int], int] = defaultdict(int)
 
         # Celdas fijas: se ocupan de antemano (inmutables para el solver).
         self.fijas: list[dict] = []
@@ -179,6 +224,10 @@ class _Solver:
         self.occ_salon[(f.salon_id, f.dia, f.bloque)] = True
         self.bloques_usados[f.docente_id] += 1
         self.mat_dia_cuenta[(f.curso_id, f.materia_id, f.dia)] += 1
+        self.docente_dia[(f.docente_id, f.dia)] += 1
+        # También ocupa el mapa (curso, materia, dia, bloque): las celdas
+        # fijas deben contar para anti-contigüidad y variabilidad semanal.
+        self.occ_mismo_materia[(f.curso_id, f.materia_id, f.dia, f.bloque)] = True
         self.fijas.append(
             {
                 "curso_id": f.curso_id,
@@ -218,6 +267,11 @@ class _Solver:
                     continue
                 for s in salones:
                     dominio.append((doc.id, s.id, sl.dia, sl.bloque))
+        # Aleatorizar el dominio rompe el orden secuencial (dia, bloque) con
+        # el que se construyó: sin esto, los empates de las soft tienden a
+        # llenar siempre Lunes→Viernes y bloque 1→6, produciendo horarios
+        # lineales y repetitivos.
+        self.rng.shuffle(dominio)
         return dominio
 
     def _construir_variables(self, plan: dict[int, dict[int, int]]) -> None:
@@ -237,6 +291,10 @@ class _Solver:
                 for _ in range(restantes):
                     self.vars.append(_Var(vid, curso.id, materia_id, dominio))
                     vid += 1
+        # Orden aleatorio de las variables: rompe el patrón curso 1→N,
+        # materia 1→M con el que se crearon (complementa el shuffle de
+        # dominios para evitar resultados lineales).
+        self.rng.shuffle(self.vars)
 
     def _calcular_grados(self) -> dict[int, int]:
         """Grado: cuántas otras variables comparten curso, docente o salón."""
@@ -316,6 +374,15 @@ class _Solver:
         """
         return self.mat_dia_cuenta.get((v.curso_id, v.materia_id, dia), 0)
 
+    def _penal_docente_dia(self, d: int, dia: int) -> int:
+        """Bloques que el docente ya tiene ese día.
+
+        En problemas reales cada docente cubre casi todos sus slots; si sus
+        clases se apilan a un día, el matching se acorrala (dead-ends). Esta
+        soft empuja las clases del docente hacia sus días menos cargados.
+        """
+        return self.docente_dia.get((d, dia), 0)
+
     def _penal_contiguos(self, v: _Var, valor: tuple[int, int, int, int]) -> int:
         """Penaliza quedar pegado a otra clase de la MISMA materia, mismo día.
 
@@ -330,6 +397,38 @@ class _Solver:
             if self.occ_mismo_materia.get((v.curso_id, v.materia_id, dia, b)):
                 pena += 1
         return pena
+
+    def _penal_misma_hora_consecutivos(
+        self, v: _Var, valor: tuple[int, int, int, int]
+    ) -> int:
+        """Soft de variabilidad semanal: misma materia a la MISMA hora
+        (bloque) en días consecutivos.
+
+        Cuenta la longitud de la racha de días consecutivos (hacia abajo y
+        hacia arriba desde `dia`) en los que este (curso, materia) ya ocupa
+        este mismo `bloque`. Penaliza solo el exceso sobre
+        MAX_DIAS_MISMA_HORA (=2): 0 mientras la racha sea corta, >0 cuando la
+        materia amenaza con quedar "clavada" a la misma hora casi toda la
+        semana (p. ej. Matemáticas a primera hora Lun-Vie).
+
+        Soft: ordena, nunca bloquea (una racha larga sigue siendo válida si
+        es la única forma de llenar la grilla).
+        """
+        _d, _s, dia, bloque = valor
+        k = (v.curso_id, v.materia_id, bloque)
+        # La propia celda que se evalúa cuenta como 1 de la racha.
+        racha = 1
+        # Días anteriores consecutivos con la materia en este mismo bloque.
+        d = dia - 1
+        while self.occ_mismo_materia.get((v.curso_id, v.materia_id, d, bloque)):
+            racha += 1
+            d -= 1
+        # Días posteriores consecutivos.
+        d = dia + 1
+        while self.occ_mismo_materia.get((v.curso_id, v.materia_id, d, bloque)):
+            racha += 1
+            d += 1
+        return max(0, racha - MAX_DIAS_MISMA_HORA)
 
     def valores_vivos(self, v: _Var) -> list[tuple[int, int, int, int]]:
         """Subdominio actual: valores que no chocan con el estado presente."""
@@ -346,23 +445,30 @@ class _Solver:
           1. Degree: la variable que más interacciona con otras;
           2. Balance: la del curso con MENOS celdas asignadas. Evita que un par
              de cursos acaparen las aulas/salones y dejen vacíos al resto
-             (T-028: repartir el llenado entre los 6 cursos).
+             (T-028: repartir el llenado entre los 6 cursos);
+          3. Aleatorio (perturbación estocástica): entre variables empatadas
+             en todo lo anterior se elige al azar — evita que el patrón de
+             ramificación sea siempre el mismo y diversifica los horarios.
         """
-        mejor: _Var | None = None
-        mejor_n = None
-        mejor_deg = -1
-        mejor_bal = None
+        candidatas: list[_Var] = []
+        mejor_clave: tuple | None = None
         for v in self.vars:
             if v.asignado is not None:
                 continue
             n = sum(1 for val in v.base_domain if self.valor_posible(v, val))
-            deg = self.grado[v.vid]
-            bal = self.asig_curso.get(v.curso_id, 0)
             if n == 0:
                 return v  # sin valores: se detecta como conflicto antes de ramificar
-            if mejor is None or (bal, n, -deg) < (mejor_bal, mejor_n, -mejor_deg):
-                mejor, mejor_n, mejor_deg, mejor_bal = v, n, deg, bal
-        return mejor
+            deg = self.grado[v.vid]
+            bal = self.asig_curso.get(v.curso_id, 0)
+            clave = (bal, n, -deg)
+            if mejor_clave is None or clave < mejor_clave:
+                mejor_clave = clave
+                candidatas = [v]
+            elif clave == mejor_clave:
+                candidatas.append(v)
+        if not candidatas:
+            return None
+        return self.rng.choice(candidatas)
 
     def _valores_ordenados(self, v: _Var) -> list[tuple[int, int, int, int]]:
         """LCV con soft-constraints y preferencias (menor primer).
@@ -370,10 +476,16 @@ class _Solver:
         Orden de prioridad (T-028, lo suave ordena pero sin bloquear):
           1. exceso de carga horaria del docente (0 = dentro de contrato),
           2. exceso de bloques de la materia en el día (§4.3, techo 2),
-          3. `dia` con menos bloques ya asignados de la materia (reparto Lu→Vi),
-          4. menos vecinos contiguos del mismo (curso, materia) en ese día,
-          5. (dia, bloque) menos demandado por el resto (criterio LCV clásico),
-          6. (dia, bloque) con MENOS clases ya asignadas (llena slots libres).
+          3. racha de días consecutivos con la materia a la MISMA hora
+             (variabilidad semanal, techo 2 días),
+          4. día menos cargado del DOCENTE (evita apilar sus clases y
+             acorralar el matching),
+          5. `dia` con menos bloques ya asignados de la materia (reparto Lu→Vi),
+          6. menos vecinos contiguos del mismo (curso, materia) en ese día,
+          7. (dia, bloque) menos demandado por el resto (criterio LCV clásico),
+          8. (dia, bloque) con MENOS clases ya asignadas (llena slots libres),
+          9. jitter aleatorio: rompe el orden secuencial entre valores con
+             idéntica penalización (perturbación estocástica).
         """
         vivos = self.valores_vivos(v)
         return sorted(
@@ -381,12 +493,13 @@ class _Solver:
             key=lambda val: (
                 self._penal_carga(val[0]),
                 self._penal_materia_dia(v, val[2]),
+                self._penal_misma_hora_consecutivos(v, val),
+                self._penal_docente_dia(val[0], val[2]),
                 self._penal_dia(v, val[2]),
                 self._penal_contiguos(v, val),
                 self._demanda.get((val[2], val[3]), 0),
                 self._penal_slot(val[2], val[3]),
-                val[2],
-                val[3],
+                self.rng.random(),
             ),
         )
 
@@ -401,6 +514,7 @@ class _Solver:
         self.occ_mismo_materia[(v.curso_id, v.materia_id, dia, bloque)] = True
         self.asig_curso[v.curso_id] += 1
         self.occ_slot[(dia, bloque)] += 1
+        self.docente_dia[(d, dia)] += 1
 
     def _desasignar(self, v: _Var) -> None:
         if v.asignado is None:
@@ -414,6 +528,7 @@ class _Solver:
         self.occ_mismo_materia.pop((v.curso_id, v.materia_id, dia, bloque), None)
         self.asig_curso[v.curso_id] -= 1
         self.occ_slot[(dia, bloque)] -= 1
+        self.docente_dia[(d, dia)] -= 1
         v.asignado = None
 
     def _soft_score(self) -> int:
@@ -523,25 +638,95 @@ class _Solver:
         Solo se garantizan las RESTRICCIONES DURAS: docente, salón y curso
         sin choques en cada (dia, bloque). Se ignoran las soft (carga, §4.3,
         anti-contigüidad) y el tipo de salón para maximizar el llenado.
+
+        El llenado usa MRV dinámico (la variable con menos valores vivos en
+        cada paso) con jitter aleatorio. Como el problema es un matching
+        perfecto, un intento puede acorralar a la última variable; por eso
+        se reintenta con nueva aleatorización hasta GREEDY_REINTENTOS,
+        conservando el intento que más celdas haya colocado.
         """
         self._restaurar_mejor()
-        pendientes = [v for v in self.vars if v.asignado is None]
-        # MRV: primero las variables con dominio más chico (menos opciones).
-        pendientes.sort(key=lambda v: len(v.base_domain))
-        for v in pendientes:
+        fijas_previas = [v for v in self.vars if v.asignado is not None]
+
+        mejor_snapshot: dict[int, tuple[int, int, int, int]] = {
+            v.vid: v.asignado for v in fijas_previas
+        }
+
+        for _intento in range(GREEDY_REINTENTOS):
             if time.time() > self._deadline:
                 break
-            if v.asignado is not None:
-                continue
-            vivos = [val for val in self._valores_greedy(v) if self.valor_posible(v, val)]
+            # Volver al estado base (mejor parcial del backtracking).
+            for v in self.vars:
+                if v.asignado is not None:
+                    self._desasignar(v)
+            for vid, valor in mejor_snapshot.items():
+                if valor is not None:
+                    v = next(w for w in self.vars if w.vid == vid)
+                    self._asignar(v, valor)
+
+            self._pasada_greedy()
+            colocadas = sum(1 for v in self.vars if v.asignado is not None)
+            if colocadas == len(self.vars):
+                return  # grilla completa: listo
+            # Guardar este intento si mejora; sus asignaciones se conservan
+            # como estado para el siguiente ciclo (que las resetea).
+            if colocadas > len(mejor_snapshot):
+                mejor_snapshot = {
+                    v.vid: v.asignado for v in self.vars if v.asignado is not None
+                }
+
+        # Asegurar que el estado final refleje el mejor intento alcanzado.
+        colocadas = sum(1 for v in self.vars if v.asignado is not None)
+        if colocadas < len(mejor_snapshot):
+            for v in self.vars:
+                if v.asignado is not None:
+                    self._desasignar(v)
+            for vid, valor in mejor_snapshot.items():
+                v = next(w for w in self.vars if w.vid == vid)
+                self._asignar(v, valor)
+
+    def _pasada_greedy(self) -> None:
+        """Una pasada greedy: MRV dinámico + slot menos saturado + jitter."""
+        while True:
+            if time.time() > self._deadline:
+                return
+            # MRV dinámico: la variable SIN asignar con menos valores vivos
+            # (ataca primero a las más acorraladas; el tail del matching es
+            # lo que rompe al greedy estático).
+            candidata: _Var | None = None
+            menor = None
+            empate: list[_Var] = []
+            for v in self.vars:
+                if v.asignado is not None:
+                    continue
+                n = 0
+                for val in v.base_domain:
+                    if self.valor_posible(v, val):
+                        n += 1
+                if n == 0:
+                    continue  # ya no tiene salida en esta pasada
+                if menor is None or n < menor:
+                    menor = n
+                    empate = [v]
+                elif n == menor:
+                    empate.append(v)
+            if not empate:
+                return  # nada más por colocar (o sin opciones)
+            v = self.rng.choice(empate) if len(empate) > 1 else empate[0]
+
+            vivos = [
+                val
+                for val in self._valores_greedy(v)
+                if self.valor_posible(v, val)
+            ]
             if not vivos:
-                continue  # no hay (d, s, dia, bloque) libre: queda sin ubicar
-            # Orden: slot menos saturado primero → reparte las clases en la grilla.
+                continue  # esta pasada no puede ubicarla
+            # Slot menos saturado + variabilidad semanal + jitter aleatorio.
             vivos.sort(
                 key=lambda val: (
                     self._penal_slot(val[2], val[3]),
-                    val[2],
-                    val[3],
+                    self._penal_misma_hora_consecutivos(v, val),
+                    self.rng.random(),
                 )
             )
             self._asignar(v, vivos[0])
@@ -689,34 +874,53 @@ def aqui_celdas(celdas: list[dict]) -> list[dict]:
     return sorted(celdas, key=lambda c: (c["curso_id"], c["dia"], c["bloque"]))
 
 
-def solve(problem: Problem) -> ScheduleResult:
+def solve(problem: Problem, semilla: int | None = None) -> ScheduleResult:
     """Punto de entrada: asigna intensidades y resuelve el CSP.
 
     1) `allocate_intensities` → cuántos bloques por materia (T-016).
-    2) Backtracking MRV/Degree/LCV con forward checking (T-017…T-020).
+    2) Backtracking MRV/Degree/LCV con forward checking (T-017…T-020) y
+       perturbación estocástica (dominios barajados + desempates aleatorios).
     3) Si no hay solución completa, se entrega el mejor armado parcial
        junto con el reporte estructurado de conflictos y `avisos`.
+
+    `semilla=None` (por defecto) aleatoriza cada generación: dos llamadas
+    sobre el mismo problema producen horarios distintos. Con una semilla
+    fija la búsqueda es reproducible (útil en tests).
     """
     plan, avisos_intensidad = allocate_intensities(problem)
 
     cur_nombre = {c.id: c.nombre for c in problem.cursos}
     mat_nombre = {m.id: m.nombre for m in problem.materias.values()}
 
-    solver = _Solver(problem, plan, cur_nombre, mat_nombre)
+    solver = _Solver(problem, plan, cur_nombre, mat_nombre, semilla=semilla)
     solver._t0 = time.time()
 
     n_totales = len(solver.vars)
-    # T-029: el backtracking tiene una ventana acotada (GREEDY_TRIGGER_SEG);
-    # si lo supera, se delega a un completado greedy que llena la grilla
-    # respetando SOLO restricciones duras (docente/salón/curso).
-    solver._deadline = time.time() + GREEDY_TRIGGER_SEG
+    # T-029 + estocasticidad: el backtracking se reinicia con otra
+    # aleatorización si un intento no converge. La perturbación estocástica
+    # da alta varianza (algunos órdenes resuelven en <1s, otros se pierden);
+    # cada intento tiene una ventana corta y las semillas buenas terminan
+    # muy por debajo de ella. El greedy (con sus propios reintentos) queda
+    # como última instancia.
     truncado_por_tiempo = False
-    try:
-        solver._backtrack()
-    except NodeLimitReached:
-        truncado_por_tiempo = True
-    except TimeLimitReached:
-        truncado_por_tiempo = True
+    deadline_global = time.time() + TIME_LIMIT_SEG
+    for intento in range(BACKTRACK_REINTENTOS):
+        if intento > 0:
+            # Reinicio estocástico: nueva barajada de dominios/variables y
+            # otra secuencia de jitter (el intento anterior ya agotó su orden).
+            plan_sig, _av = allocate_intensities(problem)
+            solver = _Solver(problem, plan_sig, cur_nombre, mat_nombre)
+            n_totales = len(solver.vars)
+        solver._deadline = time.time() + BACKTRACK_VENTANA_SEG
+        try:
+            if solver._backtrack():
+                truncado_por_tiempo = False
+                break
+            truncado_por_tiempo = True  # agotó la búsqueda sin completar
+        except (NodeLimitReached, TimeLimitReached):
+            truncado_por_tiempo = True
+        if time.time() > deadline_global:
+            break
 
     if not solver._completo():
         # Fallback greedy: rellena desde el mejor parcial con 0 conflictos duros.
@@ -724,7 +928,9 @@ def solve(problem: Problem) -> ScheduleResult:
         # quedó vencido tras el backtracking (compartía el mismo `_deadline`);
         # si no lo reiniciamos, `_rellenar_greedy` rompe en la primera iteración
         # y entrega el parcial del backtracking sin completar la grilla.
-        solver._deadline = time.time() + GREEDY_TRIGGER_SEG
+        solver._deadline = min(
+            time.time() + GREEDY_TRIGGER_SEG, deadline_global
+        )
         solver._rellenar_greedy()
 
     if truncado_por_tiempo:

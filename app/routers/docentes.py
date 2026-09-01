@@ -10,7 +10,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.docentes import DocenteCreate, DocenteUpdate, DocenteOut
 from app.models.disponibilidades import (
@@ -24,6 +24,9 @@ router = APIRouter(
     tags=["Docentes"],
     dependencies=[Depends(get_current_user)],
 )
+
+ADMIN_ONLY = ["admin"]
+READ_ROLES = ["admin", "docente", "estudiante"]
 
 DOC_TABLE = "docentes"
 DISP_TABLE = "disponibilidades"
@@ -47,7 +50,7 @@ def _get_docente(conn, docente_id: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[DocenteOut])
+@router.get("", response_model=list[DocenteOut], dependencies=[Depends(require_roles(READ_ROLES))])
 def list_docentes(
     activo: bool | None = None,
     conn: psycopg.Connection = Depends(get_db),
@@ -64,7 +67,7 @@ def list_docentes(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/{docente_id}", response_model=DocenteOut)
+@router.get("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(READ_ROLES))])
 def get_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -73,7 +76,7 @@ def get_docente(
     return _get_docente(conn, docente_id)
 
 
-@router.post("", response_model=DocenteOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=DocenteOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def create_docente(
     payload: DocenteCreate,
     conn: psycopg.Connection = Depends(get_db),
