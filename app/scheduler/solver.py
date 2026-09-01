@@ -255,7 +255,10 @@ class _Solver:
         else:
             salones = [s for s in self.problem.salones if s.tipo == "aula"]
 
-        slots = self.problem.jornada.slots
+        # 1) Aleatorizar dominios: barajar la lista de slots (días y bloques)
+        # antes de iniciar el bucle de asignación para romper linealidad.
+        slots = list(self.problem.jornada.slots)
+        self.rng.shuffle(slots)
         for doc in self.problem.docentes:
             # El docente debe dictar esta materia Y estar asignado a este curso.
             if materia_id not in doc.materias or curso.id not in doc.cursos:
@@ -470,7 +473,7 @@ class _Solver:
             return None
         return self.rng.choice(candidatas)
 
-    def _valores_ordenados(self, v: _Var) -> list[tuple[int, int, int, int]]:
+def _valores_ordenados(self, v: _Var) -> list[tuple[int, int, int, int]]:
         """LCV con soft-constraints y preferencias (menor primer).
 
         Orden de prioridad (T-028, lo suave ordena pero sin bloquear):
@@ -479,13 +482,13 @@ class _Solver:
           3. racha de días consecutivos con la materia a la MISMA hora
              (variabilidad semanal, techo 2 días),
           4. día menos cargado del DOCENTE (evita apilar sus clases y
-             acorralar el matching),
+              acorralar el matching),
           5. `dia` con menos bloques ya asignados de la materia (reparto Lu→Vi),
           6. menos vecinos contiguos del mismo (curso, materia) en ese día,
           7. (dia, bloque) menos demandado por el resto (criterio LCV clásico),
           8. (dia, bloque) con MENOS clases ya asignadas (llena slots libres),
           9. jitter aleatorio: rompe el orden secuencial entre valores con
-             idéntica penalización (perturbación estocástica).
+              idéntica penalización (perturbación estocástica).
         """
         vivos = self.valores_vivos(v)
         return sorted(
@@ -499,7 +502,7 @@ class _Solver:
                 self._penal_contiguos(v, val),
                 self._demanda.get((val[2], val[3]), 0),
                 self._penal_slot(val[2], val[3]),
-                self.rng.random(),
+                self.rng.uniform(0, 0.01),
             ),
         )
 
