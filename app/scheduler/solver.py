@@ -506,280 +506,269 @@ def _valores_ordenados(self, v: _Var) -> list[tuple[int, int, int, int]]:
             ),
         )
 
-    def _asignar(self, v: _Var, valor: tuple[int, int, int, int]) -> None:
-        d, s, dia, bloque = valor
-        v.asignado = valor
-        self.occ_curso[(v.curso_id, dia, bloque)] = True
-        self.occ_docente[(d, dia, bloque)] = True
-        self.occ_salon[(s, dia, bloque)] = True
-        self.bloques_usados[d] += 1
-        self.mat_dia_cuenta[(v.curso_id, v.materia_id, dia)] += 1
-        self.occ_mismo_materia[(v.curso_id, v.materia_id, dia, bloque)] = True
-        self.asig_curso[v.curso_id] += 1
-        self.occ_slot[(dia, bloque)] += 1
-        self.docente_dia[(d, dia)] += 1
+        def _asignar(self, v: _Var, valor: tuple[int, int, int, int]) -> None:
+            d, s, dia, bloque = valor
+            v.asignado = valor
+            self.occ_curso[(v.curso_id, dia, bloque)] = True
+            self.occ_docente[(d, dia, bloque)] = True
+            self.occ_salon[(s, dia, bloque)] = True
+            self.bloques_usados[d] += 1
 
-    def _desasignar(self, v: _Var) -> None:
-        if v.asignado is None:
-            return
-        d, s, dia, bloque = v.asignado
-        self.occ_curso.pop((v.curso_id, dia, bloque), None)
-        self.occ_docente.pop((d, dia, bloque), None)
-        self.occ_salon.pop((s, dia, bloque), None)
-        self.bloques_usados[d] -= 1
-        self.mat_dia_cuenta[(v.curso_id, v.materia_id, dia)] -= 1
-        self.occ_mismo_materia.pop((v.curso_id, v.materia_id, dia, bloque), None)
-        self.asig_curso[v.curso_id] -= 1
-        self.occ_slot[(dia, bloque)] -= 1
-        self.docente_dia[(d, dia)] -= 1
-        v.asignado = None
-
-    def _soft_score(self) -> int:
-        """Suma de excesos suaves del estado actual (carga docente + §4.3).
-
-        Solo se calcula al mejorar el mejor parcial (evento raro), así que su
-        coste O(vars) no pesa en el bucle de búsqueda.
-        """
-        score = 0
-        for v in self.vars:
+        def _desasignar(self, v: _Var) -> None:
             if v.asignado is None:
-                continue
-            d, _s, dia, _b = v.asignado
-            exceso = self.bloques_usados.get(d, 0) - self.capacidad_bloques.get(d, 0)
-            if exceso > 0:
-                score += exceso
-            mat_dia = self.mat_dia_cuenta.get((v.curso_id, v.materia_id, dia), 0)
-            if mat_dia > MAX_BLOQUES_MATERIA_DIA:
-                score += mat_dia - MAX_BLOQUES_MATERIA_DIA
-        return score
+                return
+            d, s, dia, bloque = v.asignado
+            self.occ_curso.pop((v.curso_id, dia, bloque), None)
+            self.occ_docente.pop((d, dia, bloque), None)
+            self.occ_salon.pop((s, dia, bloque), None)
+            self.bloques_usados[d] -= 1 
 
-    def _guardar_mejor(self) -> None:
-        """Guarda el parcial actual si es el mejor (más profundo; a igualdad,
-        con menos violaciones de las restricciones suaves)."""
-        profundidad = sum(1 for w in self.vars if w.asignado)
-        if profundidad > self.best_depth or (
-            profundidad == self.best_depth
-            and self.best
-            and self._soft_score() < self.best_soft
-        ):
-            self.best_depth = profundidad
-            self.best_soft = self._soft_score()
-            self.best = {w.vid: w.asignado for w in self.vars if w.asignado}
+        def _soft_score(self) -> int:
+            """Suma de excesos suaves del estado actual (carga docente + §4.3).
 
-    def _backtrack(self) -> bool:
-        self.nodos += 1
-        if self.nodos > MAX_NODES:
-            raise NodeLimitReached()
-        # Chequeo periódico del límite de tiempo interno (barato: cada 256 nodos).
-        if self.nodos % TIME_CHECK_CADA == 0 and time.time() > self._deadline:
-            raise TimeLimitReached()
+            Solo se calcula al mejorar el mejor parcial (evento raro), así que su
+            coste O(vars) no pesa en el bucle de búsqueda.
+            """
+            score = 0
+            for v in self.vars:
+                if v.asignado is None:
+                    continue
+                d, _s, dia, _b = v.asignado
+                exceso = self.bloques_usados.get(d, 0) - self.capacidad_bloques.get(d, 0)
+                if exceso > 0:
+                    score += exceso
+                mat_dia = self.mat_dia_cuenta.get((v.curso_id, v.materia_id, dia), 0)
+                if mat_dia > MAX_BLOQUES_MATERIA_DIA:
+                    score += mat_dia - MAX_BLOQUES_MATERIA_DIA
+            return score
 
-        v = self._siguiente_variable()
-        if v is None:
-            return True  # todo asignado
+        def _guardar_mejor(self) -> None:
+            """Guarda el parcial actual si es el mejor (más profundo; a igualdad,
+            con menos violaciones de las restricciones suaves)."""
+            profundidad = sum(1 for w in self.vars if w.asignado)
+            if profundidad > self.best_depth or (
+                profundidad == self.best_depth
+                and self.best
+                and self._soft_score() < self.best_soft
+            ):
+                self.best_depth = profundidad
+                self.best_soft = self._soft_score()
+                self.best = {w.vid: w.asignado for w in self.vars if w.asignado}
 
-        for valor in self._valores_ordenados(v):
-            self._asignar(v, valor)
-            self._guardar_mejor()
-            try:
-                if self._backtrack():
-                    return True
-            except (NodeLimitReached, TimeLimitReached):
-                raise
-            self._desasignar(v)
-        return False
+        def _backtrack(self) -> bool:
+            self.nodos += 1
+            if self.nodos > MAX_NODES:
+                raise NodeLimitReached()
+            # Chequeo periódico del límite de tiempo interno (barato: cada 256 nodos).
+            if self.nodos % TIME_CHECK_CADA == 0 and time.time() > self._deadline:
+                raise TimeLimitReached()
+
+            v = self._siguiente_variable()
+            if v is None:
+                return True  # todo asignado
+
+            for valor in self._valores_ordenados(v):
+                self._asignar(v, valor)
+                self._guardar_mejor()
+                try:
+                    if self._backtrack():
+                        return True
+                except (NodeLimitReached, TimeLimitReached):
+                    raise
+                self._desasignar(v)
+            return False
 
     # ------------------------------------------------------------------
     # Fallback greedy (T-029)
     # ------------------------------------------------------------------
 
-    def _completo(self) -> bool:
-        """True si no queda ninguna celda sin asignar."""
-        return all(v.asignado is not None for v in self.vars)
+        def _completo(self) -> bool:
+            """True si no queda ninguna celda sin asignar."""
+            return all(v.asignado is not None for v in self.vars)
 
-    def _restaurar_mejor(self) -> None:
-        """Limpia el estado y reaplica el mejor parcial guardado por el
-        backtracking, de modo que el greedy continúe desde ahí."""
-        for v in self.vars:
-            if v.asignado is not None:
-                self._desasignar(v)
-        for vid, valor in self.best.items():
-            v = next(w for w in self.vars if w.vid == vid)
-            self._asignar(v, valor)
-
-    def _valores_greedy(self, v: _Var) -> list[tuple[int, int, int, int]]:
-        """Dominio permisivo SOLO para el greedy T-029.
-
-        Se mantiene la exigencia del tipo de salón (aula para materias
-        normales, laboratorio/sala cuando la materia lo requiere) para que las
-        celdas generadas pasen el trigger `sch_celda_validar` de la BD. Se
-        relaja todo lo demás: solo se exige que el docente esté asignado a la
-        materia/curso y que cubra el bloque, y que no haya choque duro
-        (docente, salón, curso).
-        """
-        materia = self.problem.materias[v.materia_id]
-        if materia.requiere_salon:
-            salones = [s for s in self.problem.salones if s.tipo == materia.tipo_salon_requerido]
-        else:
-            salones = [s for s in self.problem.salones if s.tipo == "aula"]
-        valores: list[tuple[int, int, int, int]] = []
-        for doc in self.problem.docentes:
-            if v.materia_id not in doc.materias or v.curso_id not in doc.cursos:
-                continue
-            for sl in self.problem.jornada.slots:
-                if materia.no_ultima_hora and sl.ultimo:
-                    continue
-                if not doc.cubre(sl):
-                    continue
-                for s in salones:
-                    valores.append((doc.id, s.id, sl.dia, sl.bloque))
-        return valores
-
-    def _rellenar_greedy(self) -> None:
-        """T-029 · Completado greedy de las celdas restantes.
-
-        Solo se garantizan las RESTRICCIONES DURAS: docente, salón y curso
-        sin choques en cada (dia, bloque). Se ignoran las soft (carga, §4.3,
-        anti-contigüidad) y el tipo de salón para maximizar el llenado.
-
-        El llenado usa MRV dinámico (la variable con menos valores vivos en
-        cada paso) con jitter aleatorio. Como el problema es un matching
-        perfecto, un intento puede acorralar a la última variable; por eso
-        se reintenta con nueva aleatorización hasta GREEDY_REINTENTOS,
-        conservando el intento que más celdas haya colocado.
-        """
-        self._restaurar_mejor()
-        fijas_previas = [v for v in self.vars if v.asignado is not None]
-
-        mejor_snapshot: dict[int, tuple[int, int, int, int]] = {
-            v.vid: v.asignado for v in fijas_previas
-        }
-
-        for _intento in range(GREEDY_REINTENTOS):
-            if time.time() > self._deadline:
-                break
-            # Volver al estado base (mejor parcial del backtracking).
+        def _restaurar_mejor(self) -> None:
+            """Limpia el estado y reaplica el mejor parcial guardado por el
+            backtracking, de modo que el greedy continúe desde ahí."""
             for v in self.vars:
                 if v.asignado is not None:
                     self._desasignar(v)
-            for vid, valor in mejor_snapshot.items():
-                if valor is not None:
-                    v = next(w for w in self.vars if w.vid == vid)
-                    self._asignar(v, valor)
-
-            self._pasada_greedy()
-            colocadas = sum(1 for v in self.vars if v.asignado is not None)
-            if colocadas == len(self.vars):
-                return  # grilla completa: listo
-            # Guardar este intento si mejora; sus asignaciones se conservan
-            # como estado para el siguiente ciclo (que las resetea).
-            if colocadas > len(mejor_snapshot):
-                mejor_snapshot = {
-                    v.vid: v.asignado for v in self.vars if v.asignado is not None
-                }
-
-        # Asegurar que el estado final refleje el mejor intento alcanzado.
-        colocadas = sum(1 for v in self.vars if v.asignado is not None)
-        if colocadas < len(mejor_snapshot):
-            for v in self.vars:
-                if v.asignado is not None:
-                    self._desasignar(v)
-            for vid, valor in mejor_snapshot.items():
+            for vid, valor in self.best.items():
                 v = next(w for w in self.vars if w.vid == vid)
                 self._asignar(v, valor)
 
-    def _pasada_greedy(self) -> None:
-        """Una pasada greedy: MRV dinámico + slot menos saturado + jitter."""
-        while True:
-            if time.time() > self._deadline:
-                return
-            # MRV dinámico: la variable SIN asignar con menos valores vivos
-            # (ataca primero a las más acorraladas; el tail del matching es
-            # lo que rompe al greedy estático).
-            candidata: _Var | None = None
-            menor = None
-            empate: list[_Var] = []
-            for v in self.vars:
-                if v.asignado is not None:
+        def _valores_greedy(self, v: _Var) -> list[tuple[int, int, int, int]]:
+            """Dominio permisivo SOLO para el greedy T-029.
+
+            Se mantiene la exigencia del tipo de salón (aula para materias
+            normales, laboratorio/sala cuando la materia lo requiere) para que las
+            celdas generadas pasen el trigger `sch_celda_validar` de la BD. Se
+            relaja todo lo demás: solo se exige que el docente esté asignado a la
+            materia/curso y que cubra el bloque, y que no haya choque duro
+            (docente, salón, curso).
+            """
+            materia = self.problem.materias[v.materia_id]
+            if materia.requiere_salon:
+                salones = [s for s in self.problem.salones if s.tipo == materia.tipo_salon_requerido]
+            else:
+                salones = [s for s in self.problem.salones if s.tipo == "aula"]
+            valores: list[tuple[int, int, int, int]] = []
+            for doc in self.problem.docentes:
+                if v.materia_id not in doc.materias or v.curso_id not in doc.cursos:
                     continue
-                n = 0
-                for val in v.base_domain:
-                    if self.valor_posible(v, val):
-                        n += 1
-                if n == 0:
-                    continue  # ya no tiene salida en esta pasada
-                if menor is None or n < menor:
-                    menor = n
-                    empate = [v]
-                elif n == menor:
-                    empate.append(v)
-            if not empate:
-                return  # nada más por colocar (o sin opciones)
-            v = self.rng.choice(empate) if len(empate) > 1 else empate[0]
+                for sl in self.problem.jornada.slots:
+                    if materia.no_ultima_hora and sl.ultimo:
+                        continue
+                    if not doc.cubre(sl):
+                        continue
+                    for s in salones:
+                        valores.append((doc.id, s.id, sl.dia, sl.bloque))
+            return valores
 
-            vivos = [
-                val
-                for val in self._valores_greedy(v)
-                if self.valor_posible(v, val)
-            ]
-            if not vivos:
-                continue  # esta pasada no puede ubicarla
-            # Slot menos saturado + variabilidad semanal + jitter aleatorio.
-            vivos.sort(
-                key=lambda val: (
-                    self._penal_slot(val[2], val[3]),
-                    self._penal_misma_hora_consecutivos(v, val),
-                    self.rng.random(),
+        def _rellenar_greedy(self) -> None:
+            """T-029 · Completado greedy de las celdas restantes.
+
+            Solo se garantizan las RESTRICCIONES DURAS: docente, salón y curso
+            sin choques en cada (dia, bloque). Se ignoran las soft (carga, §4.3,
+            anti-contigüidad) y el tipo de salón para maximizar el llenado.
+
+            El llenado usa MRV dinámico (la variable con menos valores vivos en
+            cada paso) con jitter aleatorio. Como el problema es un matching
+            perfecto, un intento puede acorralar a la última variable; por eso
+            se reintenta con nueva aleatorización hasta GREEDY_REINTENTOS,
+            conservando el intento que más celdas haya colocado.
+            """
+            self._restaurar_mejor()
+            fijas_previas = [v for v in self.vars if v.asignado is not None]
+
+            mejor_snapshot: dict[int, tuple[int, int, int, int]] = {
+                v.vid: v.asignado for v in fijas_previas
+            }
+
+            for _intento in range(GREEDY_REINTENTOS):
+                if time.time() > self._deadline:
+                    break
+                # Volver al estado base (mejor parcial del backtracking).
+                for v in self.vars:
+                    if v.asignado is not None:
+                        self._desasignar(v)
+                for vid, valor in mejor_snapshot.items():
+                    if valor is not None:
+                        v = next(w for w in self.vars if w.vid == vid)
+                        self._asignar(v, valor)
+
+                self._pasada_greedy()
+                colocadas = sum(1 for v in self.vars if v.asignado is not None)
+                if colocadas == len(self.vars):
+                    return  # grilla completa: listo
+                # Guardar este intento si mejora; sus asignaciones se conservan
+                # como estado para el siguiente ciclo (que las resetea).
+                if colocadas > len(mejor_snapshot):
+                    mejor_snapshot = {
+                        v.vid: v.asignado for v in self.vars if v.asignado is not None
+                    }
+
+            # Asegurar que el estado final refleje el mejor intento alcanzado.
+            colocadas = sum(1 for v in self.vars if v.asignado is not None)
+            if colocadas < len(mejor_snapshot):
+                for v in self.vars:
+                    if v.asignado is not None:
+                        self._desasignar(v)
+                for vid, valor in mejor_snapshot.items():
+                    v = next(w for w in self.vars if w.vid == vid)
+                    self._asignar(v, valor)
+
+        def _pasada_greedy(self) -> None:
+            """Una pasada greedy: MRV dinámico + slot menos saturado + jitter."""
+            while True:
+                if time.time() > self._deadline:
+                    return
+                # MRV dinámico: la variable SIN asignar con menos valores vivos
+                # (ataca primero a las más acorraladas; el tail del matching es
+                # lo que rompe al greedy estático).
+                candidata: _Var | None = None
+                menor = None
+                empate: list[_Var] = []
+                for v in self.vars:
+                    if v.asignado is not None:
+                        continue
+                    n = 0
+                    for val in v.base_domain:
+                        if self.valor_posible(v, val):
+                            n += 1
+                    if n == 0:
+                        continue  # ya no tiene salida en esta pasada
+                    if menor is None or n < menor:
+                        menor = n
+                        empate = [v]
+                    elif n == menor:
+                        empate.append(v)
+                if not empate:
+                    return  # nada más por colocar (o sin opciones)
+                v = self.rng.choice(empate) if len(empate) > 1 else empate[0]
+
+                vivos = [
+                    val
+                    for val in self._valores_greedy(v)
+                    if self.valor_posible(v, val)
+                ]
+                if not vivos:
+                    continue  # esta pasada no puede ubicarla
+                # Slot menos saturado + variabilidad semanal + jitter aleatorio.
+                vivos.sort(
+                    key=lambda val: (
+                        self._penal_slot(val[2], val[3]),
+                        self._penal_misma_hora_consecutivos(v, val),
+                        self.rng.random(),
+                    )
                 )
-            )
-            self._asignar(v, vivos[0])
+                self._asignar(v, vivos[0])
 
-    # ------------------------------------------------------------------
-    # Cierre / reporte
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Cierre / reporte
+        # ------------------------------------------------------------------
 
-    def _razon_conflicto(self, v: _Var) -> str:
-        """Explica por qué `v` no pudo ubicarse con el estado final."""
-        materia = self.problem.materias.get(v.materia_id)
-        if not v.docentes:
-            return "El docente no está asignado a esta materia/curso (sin candidatos)."
-        if not v.salones:
-            return (
-                f"No hay salones del tipo requerido por la materia "
-                f"({materia.tipo_salon_requerido if materia else '?'})."
-            )
-        motivos = set()
-        for d, s, dia, bloque in v.base_domain:
-            if self.valor_posible(v, (d, s, dia, bloque)):
-                motivos.add("bloques ocupados por otras asignaciones")
-                break
-            if self.occ_curso.get((v.curso_id, dia, bloque)):
-                motivos.add("el curso ya tiene clase en ese (día,bloque)")
-            elif self.occ_docente.get((d, dia, bloque)):
-                motivos.add("el docente ya dicta en ese (día,bloque)")
-            elif self.occ_salon.get((s, dia, bloque)):
-                motivos.add("el salón está ocupado en ese (día,bloque)")
-            elif self.bloques_usados.get(d, 0) >= self.capacidad_bloques.get(d, 0):
-                motivos.add("se agotó la carga horaria del docente")
-        if motivos:
-            return "Bloqueado porque " + "; ".join(sorted(motivos)[:3]) + "."
+        def _razon_conflicto(self, v: _Var) -> str:
+            """Explica por qué `v` no pudo ubicarse con el estado final."""
+            materia = self.problem.materias.get(v.materia_id)
+            if not v.docentes:
+                return "El docente no está asignado a esta materia/curso (sin candidatos)."
+            if not v.salones:
+                return (
+                    f"No hay salones del tipo requerido por la materia "
+                    f"({materia.tipo_salon_requerido if materia else '?'})."
+                )
+            motivos = set()
+            for d, s, dia, bloque in v.base_domain:
+                if self.valor_posible(v, (d, s, dia, bloque)):
+                    motivos.add("bloques ocupados por otras asignaciones")
+                    break
+                if self.occ_curso.get((v.curso_id, dia, bloque)):
+                    motivos.add("el curso ya tiene clase en ese (día,bloque)")
+                elif self.occ_docente.get((d, dia, bloque)):
+                    motivos.add("el docente ya dicta en ese (día,bloque)")
+                elif self.occ_salon.get((s, dia, bloque)):
+                    motivos.add("el salón está ocupado en ese (día,bloque)")
+                elif self.bloques_usados.get(d, 0) >= self.capacidad_bloques.get(d, 0):
+                    motivos.add("se agotó la carga horaria del docente")
+            if motivos:
+                return "Bloqueado porque " + "; ".join(sorted(motivos)[:3]) + "."
 
-    def resultado(self, n_totales: int) -> ScheduleResult:
-        """Ensambla el `ScheduleResult` a partir del estado de búsqueda."""
-        asignadas = [v for v in self.vars if v.asignado]
-        # Completo = se colocaron todas las celdas planificadas (o no había).
-        ha_completo = len(asignadas) == n_totales and n_totales > 0
-        if n_totales == 0 and not self.fijas:
-            tipo_gen = "borrador"  # no hay nada que planificar
-        else:
-            tipo_gen = "completo" if ha_completo else "parcial"
+        def resultado(self, n_totales: int) -> ScheduleResult:
+            """Ensambla el `ScheduleResult` a partir del estado de búsqueda."""
+            asignadas = [v for v in self.vars if v.asignado]
+            # Completo = se colocaron todas las celdas planificadas (o no había).
+            ha_completo = len(asignadas) == n_totales and n_totales > 0
+            if n_totales == 0 and not self.fijas:
+                tipo_gen = "borrador"  # no hay nada que planificar
+            else:
+                tipo_gen = "completo" if ha_completo else "parcial"
 
-        # Celdas del solucionador → dicts listos para INSERT.
-        celdas_nuevas: list[dict] = []
-        for v in asignadas:
-            d, s, dia, bloque = v.asignado
-            hora_ini, hora_fin = self._horas(dia, bloque)
-            celdas_nuevas.append(
+            # Celdas del solucionador → dicts listos para INSERT.
+            celdas_nuevas: list[dict] = []
+            for v in asignadas:
+                d, s, dia, bloque = v.asignado
+                hora_ini, hora_fin = self._horas(dia, bloque)
+                celdas_nuevas.append(
                 {
                     "curso_id": v.curso_id,
                     "materia_id": v.materia_id,
@@ -865,11 +854,11 @@ def _valores_ordenados(self, v: _Var) -> list[tuple[int, int, int, int]]:
             statistics=stats,
         )
 
-    def _horas(self, dia: int, bloque: int) -> tuple[Any, Any]:
-        sl = self.problem.jornada.slot(dia, bloque)
-        if sl is None:
-            return None, None
-        return sl.hora_inicio, sl.hora_fin
+        def _horas(self, dia: int, bloque: int) -> tuple[Any, Any]:
+            sl = self.problem.jornada.slot(dia, bloque)
+            if sl is None:
+                return None, None
+            return sl.hora_inicio, sl.hora_fin
 
 
 def aqui_celdas(celdas: list[dict]) -> list[dict]:
