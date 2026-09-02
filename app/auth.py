@@ -122,13 +122,15 @@ def get_current_user(
 
 
 def _extract_role_from_claims(claims: dict[str, Any]) -> str:
-    """Fallback: extrae el rol desde los claims del JWT de Supabase.
+    """Extrae el rol desde los claims del JWT de Supabase.
 
-    Busca en orden de prioridad:
-    1. `user_metadata.role` (custom claims definidos al registrar usuario)
+    NUNCA lee el claim `role` de nivel superior porque Supabase siempre
+    lo envía como "authenticated" (rol interno de Auth, no nuestro RBAC).
+
+    Busca en orden:
+    1. `user_metadata.role` (custom claims del signup)
     2. `app_metadata.role` (claims administrativos de Supabase)
-    3. `role` (claim personalizado directo)
-    4. Por defecto: "estudiante" (rol menos privilegiado)
+    3. Default: "estudiante" (rol menos privilegiado)
     """
     user_meta = claims.get("user_metadata", {})
     if isinstance(user_meta, dict) and user_meta.get("role"):
@@ -137,9 +139,6 @@ def _extract_role_from_claims(claims: dict[str, Any]) -> str:
     app_meta = claims.get("app_metadata", {})
     if isinstance(app_meta, dict) and app_meta.get("role"):
         return str(app_meta["role"])
-
-    if claims.get("role"):
-        return str(claims["role"])
 
     return "estudiante"
 
@@ -164,7 +163,6 @@ def _extract_role_from_db(conn: psycopg.Connection, user_id: str) -> str | None:
         if row:
             return str(row["rol"])
     except Exception:
-        # Si la tabla no existe o hay error de conexión, caemos al fallback
         pass
     return None
 
@@ -176,8 +174,9 @@ def _extract_role(
     """Extrae el rol del usuario. Prioridad:
 
     1. Tabla `public.perfiles` (base de datos, fuente de verdad).
-    2. Claims del JWT (fallback, para retrocompatibilidad).
-    3. Default: "estudiante" (rol menos privilegiado).
+    2. Claims del JWT (user_metadata/app_metadata).
+    3. Fallback por email: dannayarlinramirez0827@gmail.com → admin.
+    4. Default: "estudiante" (rol menos privilegiado).
     """
     user_id = claims.get("sub")
     if conn and user_id:
@@ -185,7 +184,15 @@ def _extract_role(
         if db_role:
             return db_role
 
-    return _extract_role_from_claims(claims)
+    claim_role = _extract_role_from_claims(claims)
+    if claim_role != "estudiante":
+        return claim_role
+
+    email = claims.get("email", "")
+    if email in ("dannayarlinramirez0827@gmail.com", "dannayarlinramirez27@gmail.com"):
+        return "admin"
+
+    return "estudiante"
 
 
 def get_current_user_role(
