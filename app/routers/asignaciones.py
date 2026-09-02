@@ -18,7 +18,7 @@ from app.models.asignaciones import (
     DocenteCursoCreate,
     DocenteCursoOut,
 )
-from app.routers._common import raise_db_error
+
 
 router = APIRouter(
     prefix="/asignaciones",
@@ -58,13 +58,22 @@ def list_materias_de_docente(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
     """Lista las materias que puede dictar un docente."""
-    _docente_existe(conn, docente_id)
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM docente_materia WHERE docente_id = %s ORDER BY materia_id",
-            (docente_id,),
-        )
-        return [dict(r) for r in cur.fetchall()]
+    try:
+        _docente_existe(conn, docente_id)
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT * FROM docente_materia WHERE docente_id = %s ORDER BY materia_id",
+                (docente_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR list_materias_de_docente] docente_id={docente_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al listar materias del docente: {exc}",
+        ) from exc
 
 
 @router.post(
@@ -90,8 +99,12 @@ def assign_materia_a_docente(
             )
             row = cur.fetchone()
         return dict(row)
-    except psycopg.Error as exc:
-        raise_db_error(exc)
+    except Exception as exc:
+        print(f"[ERROR assign_materia] docente_id={payload.docente_id}, materia_id={payload.materia_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al asignar materia: {exc}",
+        ) from exc
 
 
 @router.delete("/materias/{docente_id}/{materia_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -101,16 +114,25 @@ def unassign_materia_de_docente(
     conn: psycopg.Connection = Depends(get_db),
 ) -> None:
     """Quita la materia que un docente dicta."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM docente_materia WHERE docente_id = %s AND materia_id = %s",
-            (docente_id, materia_id),
-        )
-        if cur.rowcount == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="La asignación no existe.",
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM docente_materia WHERE docente_id = %s AND materia_id = %s",
+                (docente_id, materia_id),
             )
+            if cur.rowcount == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="La asignación no existe.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR unassign_materia] docente_id={docente_id}, materia_id={materia_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al quitar materia: {exc}",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -134,13 +156,22 @@ def list_cursos_de_docente(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
     """Lista los cursos que le corresponden dar a un docente."""
-    _docente_existe(conn, docente_id)
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM docente_curso WHERE docente_id = %s ORDER BY curso_id",
-            (docente_id,),
-        )
-        return [dict(r) for r in cur.fetchall()]
+    try:
+        _docente_existe(conn, docente_id)
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT * FROM docente_curso WHERE docente_id = %s ORDER BY curso_id",
+                (docente_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR list_cursos_de_docente] docente_id={docente_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al listar cursos del docente: {exc}",
+        ) from exc
 
 
 @router.post(
@@ -166,8 +197,12 @@ def assign_curso_a_docente(
             )
             row = cur.fetchone()
         return dict(row)
-    except psycopg.Error as exc:
-        raise_db_error(exc)
+    except Exception as exc:
+        print(f"[ERROR assign_curso] docente_id={payload.docente_id}, curso_id={payload.curso_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al asignar curso: {exc}",
+        ) from exc
 
 
 @router.delete("/cursos/{docente_id}/{curso_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -177,13 +212,22 @@ def unassign_curso_de_docente(
     conn: psycopg.Connection = Depends(get_db),
 ) -> None:
     """Quita el curso que corresponde a un docente."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM docente_curso WHERE docente_id = %s AND curso_id = %s",
-            (docente_id, curso_id),
-        )
-        if cur.rowcount == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="La asignación no existe.",
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM docente_curso WHERE docente_id = %s AND curso_id = %s",
+                (docente_id, curso_id),
             )
+            if cur.rowcount == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="La asignación no existe.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR unassign_curso] docente_id={docente_id}, curso_id={curso_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al quitar curso: {exc}",
+        ) from exc
