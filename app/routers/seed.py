@@ -43,6 +43,12 @@ CURSOS_PRUEBA = [
     {"nombre": "6B", "nivel": "6", "horas_semanales": 30, "orden": 2},
 ]
 
+SALONES_PRUEBA = [
+    {"nombre": "Salón 101", "tipo": "aula", "capacidad": 30, "activo": True},
+    {"nombre": "Salón 102", "tipo": "aula", "capacidad": 30, "activo": True},
+    {"nombre": "Laboratorio", "tipo": "laboratorio", "capacidad": 25, "activo": True},
+]
+
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def seed_data(
@@ -138,7 +144,24 @@ def seed_data(
                         cursos_ids.append(row["id"])
             resultados["cursos"] = len(cursos_ids)
 
-            # 6. Asignaciones docente ↔ materia
+            # 6. Salones
+            salones_ids: list[int] = []
+            with conn.cursor(row_factory=dict_row) as cur:
+                for s in SALONES_PRUEBA:
+                    cur.execute(
+                        """
+                        INSERT INTO salones (nombre, tipo, capacidad, activo)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (s["nombre"], s["tipo"], s["capacidad"], s["activo"]),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        salones_ids.append(row["id"])
+            resultados["salones"] = len(salones_ids)
+
+            # 7. Asignaciones docente ↔ materia
             asign_mat = 0
             with conn.cursor() as cur:
                 for doc_id in docentes_ids:
