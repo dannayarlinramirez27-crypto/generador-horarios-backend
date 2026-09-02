@@ -46,20 +46,15 @@ def list_configs(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/activa", response_model=ConfigOut)
+@router.get("/activa", response_model=ConfigOut | None)
 def get_active_config(
     conn: psycopg.Connection = Depends(get_db),
-) -> dict:
-    """Devuelve la configuración actualmente activa (404 si no existe)."""
+) -> dict | None:
+    """Devuelve la configuración actualmente activa, o None si no existe."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(f"SELECT * FROM {TABLE} WHERE activa = true ORDER BY id")
         row = cur.fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No hay ninguna configuración de jornada activa.",
-        )
-    return dict(row)
+    return dict(row) if row else None
 
 
 @router.get("/{config_id}", response_model=ConfigOut)

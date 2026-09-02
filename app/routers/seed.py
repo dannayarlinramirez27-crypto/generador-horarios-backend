@@ -27,20 +27,20 @@ JORNADA_PRUEBA = {
 }
 
 DOCENTES_PRUEBA = [
-    {"nombre": "Ana García", "max_horas_semanales": 30},
-    {"nombre": "Carlos López", "max_horas_semanales": 30},
-    {"nombre": "María Rodríguez", "max_horas_semanales": 30},
+    {"nombre": "Ana", "apellido": "García", "documento": "12345678", "carga_horaria": 30},
+    {"nombre": "Carlos", "apellido": "López", "documento": "23456789", "carga_horaria": 30},
+    {"nombre": "María", "apellido": "Rodríguez", "documento": "34567890", "carga_horaria": 30},
 ]
 
 MATERIAS_PRUEBA = [
-    {"nombre": "Matemáticas", "horas_semanales": 4},
-    {"nombre": "Español", "horas_semanales": 4},
-    {"nombre": "Ciencias", "horas_semanales": 4},
+    {"nombre": "Matemáticas", "categoria": "basica", "min_horas": 4, "max_horas": 5, "requiere_salon": False, "tipo_salon_requerido": None, "no_ultima_hora": False},
+    {"nombre": "Español", "categoria": "basica", "min_horas": 4, "max_horas": 5, "requiere_salon": False, "tipo_salon_requerido": None, "no_ultima_hora": False},
+    {"nombre": "Ciencias", "categoria": "basica", "min_horas": 3, "max_horas": 4, "requiere_salon": True, "tipo_salon_requerido": "laboratorio", "no_ultima_hora": False},
 ]
 
 CURSOS_PRUEBA = [
-    {"nombre": "6A", "nivel": 6, "orden": 1},
-    {"nombre": "6B", "nivel": 6, "orden": 2},
+    {"nombre": "6A", "nivel": "6", "horas_semanales": 30, "orden": 1},
+    {"nombre": "6B", "nivel": "6", "horas_semanales": 30, "orden": 2},
 ]
 
 
@@ -91,11 +91,11 @@ def seed_data(
                 for d in DOCENTES_PRUEBA:
                     cur.execute(
                         """
-                        INSERT INTO docentes (nombre, max_horas_semanales, activo)
-                        VALUES (%s, %s, true)
+                        INSERT INTO docentes (nombre, apellido, documento, carga_horaria, activo)
+                        VALUES (%s, %s, %s, %s, true)
                         RETURNING id
                         """,
-                        (d["nombre"], d["max_horas_semanales"]),
+                        (d["nombre"], d["apellido"], d["documento"], d["carga_horaria"]),
                     )
                     row = cur.fetchone()
                     if row:
@@ -108,11 +108,11 @@ def seed_data(
                 for m in MATERIAS_PRUEBA:
                     cur.execute(
                         """
-                        INSERT INTO materias (nombre, horas_semanales, activa)
-                        VALUES (%s, %s, true)
+                        INSERT INTO materias (nombre, categoria, min_horas, max_horas, requiere_salon, tipo_salon_requerido, no_ultima_hora)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
-                        (m["nombre"], m["horas_semanales"]),
+                        (m["nombre"], m["categoria"], m["min_horas"], m["max_horas"], m["requiere_salon"], m["tipo_salon_requerido"], m["no_ultima_hora"]),
                     )
                     row = cur.fetchone()
                     if row:
@@ -125,11 +125,11 @@ def seed_data(
                 for c in CURSOS_PRUEBA:
                     cur.execute(
                         """
-                        INSERT INTO cursos (nombre, nivel, orden)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO cursos (nombre, nivel, horas_semanales, orden)
+                        VALUES (%s, %s, %s, %s)
                         RETURNING id
                         """,
-                        (c["nombre"], c["nivel"], c["orden"]),
+                        (c["nombre"], c["nivel"], c["horas_semanales"], c["orden"]),
                     )
                     row = cur.fetchone()
                     if row:
