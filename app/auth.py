@@ -26,10 +26,13 @@ import time
 from typing import Any
 
 import jwt
+import psycopg
 from fastapi import Depends, Header, HTTPException, status
 from jwt import PyJWKClient
+from psycopg.rows import dict_row
 
 from app.config import get_settings
+from app.db import get_db
 
 # ---------------------------------------------------------------------------
 # Cache de JWKS (Json Web Key Set) de Supabase
@@ -118,8 +121,8 @@ def get_current_user(
     return _verify_token(token)
 
 
-def _extract_role(claims: dict[str, Any]) -> str:
-    """Extrae el rol del usuario desde los claims del JWT de Supabase.
+def _extract_role_from_claims(claims: dict[str, Any]) -> str:
+    """Fallback: extrae el rol desde los claims del JWT de Supabase.
 
     Busca en orden de prioridad:
     1. `user_metadata.role` (custom claims definidos al registrar usuario)
@@ -127,29 +130,74 @@ def _extract_role(claims: dict[str, Any]) -> str:
     3. `role` (claim personalizado directo)
     4. Por defecto: "estudiante" (rol menos privilegiado)
     """
-    # user_metadata: claims que el usuario puede modificar (ej. en signup)
     user_meta = claims.get("user_metadata", {})
     if isinstance(user_meta, dict) and user_meta.get("role"):
         return str(user_meta["role"])
 
-    # app_metadata: claims que solo admins de Supabase pueden modificar
     app_meta = claims.get("app_metadata", {})
     if isinstance(app_meta, dict) and app_meta.get("role"):
         return str(app_meta["role"])
 
-    # Claim directo 'role' si existe
     if claims.get("role"):
         return str(claims["role"])
 
-    # Default: rol menos privilegiado
     return "estudiante"
+
+
+def _extract_role_from_db(conn: psycopg.Connection, user_id: str) -> str | None:
+    """Consulta el rol del usuario desde la tabla `public.perfiles`.
+
+    Args:
+        conn: Conexión activa a PostgreSQL.
+        user_id: UUID del usuario (claim `sub` del JWT).
+
+    Returns:
+        El rol ('admin', 'docente', 'estudiante') o None si no hay perfil.
+    """
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT rol FROM public.perfiles WHERE id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+        if row:
+            return str(row["rol"])
+    except Exception:
+        # Si la tabla no existe o hay error de conexión, caemos al fallback
+        pass
+    return None
+
+
+def _extract_role(
+    claims: dict[str, Any],
+    conn: psycopg.Connection | None = None,
+) -> str:
+    """Extrae el rol del usuario. Prioridad:
+
+    1. Tabla `public.perfiles` (base de datos, fuente de verdad).
+    2. Claims del JWT (fallback, para retrocompatibilidad).
+    3. Default: "estudiante" (rol menos privilegiado).
+    """
+    user_id = claims.get("sub")
+    if conn and user_id:
+        db_role = _extract_role_from_db(conn, user_id)
+        if db_role:
+            return db_role
+
+    return _extract_role_from_claims(claims)
 
 
 def get_current_user_role(
     usuario: dict[str, Any] = Depends(get_current_user),
+    conn: psycopg.Connection = Depends(get_db),
 ) -> str:
-    """Dependencia que devuelve el rol del usuario autenticado."""
-    return _extract_role(usuario)
+    """Dependencia que devuelve el rol del usuario autenticado.
+
+    Consulta primero la tabla `public.perfiles` en la base de datos;
+    si no hay registro, cae al fallback de los claims del JWT.
+    """
+    return _extract_role(usuario, conn)
 
 
 def require_roles(allowed_roles: list[str]):
@@ -161,8 +209,11 @@ def require_roles(allowed_roles: list[str]):
 
     Lanza 403 si el usuario autenticado no tiene ninguno de los roles permitidos.
     """
-    def _check_role(usuario: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
-        role = _extract_role(usuario)
+    def _check_role(
+        usuario: dict[str, Any] = Depends(get_current_user),
+        conn: psycopg.Connection = Depends(get_db),
+    ) -> dict[str, Any]:
+        role = _extract_role(usuario, conn)
         if role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
