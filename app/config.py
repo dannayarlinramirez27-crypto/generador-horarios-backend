@@ -46,7 +46,13 @@ class Settings(BaseSettings):
 
     @property
     def database_url_value(self) -> str:
-        return self.database_url.get_secret_value()
+        url = self.database_url.get_secret_value()
+        # Desactiva el cache de prepared statements para evitar errores con
+        # el pooler de Supabase (connection pooler / pgbouncer).
+        if url and "prepared_statement_cache_size" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}prepared_statement_cache_size=0"
+        return url
 
     @property
     def supabase_url_value(self) -> str:
