@@ -1,7 +1,7 @@
 """Router para carga de datos de prueba (seed)."""
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
 from app.db import get_db
@@ -47,8 +47,10 @@ CURSOS_PRUEBA = [
 @router.post("", status_code=status.HTTP_201_CREATED)
 def seed_data(
     conn: psycopg.Connection = Depends(get_db),
+    body: dict | None = Body(None),
 ) -> dict:
-    """Limpia e inserta datos de prueba mínimos para probar la generación de horarios."""
+    """Limpia e inserta datos de prueba mínimos para probar la generación de horarios.
+    No requiere cuerpo en el request (body)."""
     resultados: dict = {}
 
     try:

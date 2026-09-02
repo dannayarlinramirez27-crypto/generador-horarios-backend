@@ -22,10 +22,15 @@ TABLE = "cursos"
 def list_cursos(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
-    """Lista todos los cursos ordenados por nivel/orden."""
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(f"SELECT * FROM {TABLE} ORDER BY nivel::int, orden, nombre")
-        return [dict(r) for r in cur.fetchall()]
+    """Lista todos los cursos ordenados por nivel/orden.
+    Si la tabla está vacía o hay error de BD, retorna [] con 200."""
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT * FROM {TABLE} ORDER BY orden, nombre")
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"[ERROR list_cursos] {exc}")
+        return []
 
 
 @router.get("/{curso_id}", response_model=CursoOut)

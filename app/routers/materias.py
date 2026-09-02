@@ -25,10 +25,15 @@ TABLE = "materias"
 def list_materias(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
-    """Lista todas las materias del plan de estudios."""
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(f"SELECT * FROM {TABLE} ORDER BY nombre")
-        return [dict(r) for r in cur.fetchall()]
+    """Lista todas las materias del plan de estudios.
+    Si la tabla está vacía o hay error de BD, retorna [] con 200."""
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT * FROM {TABLE} ORDER BY nombre")
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"[ERROR list_materias] {exc}")
+        return []
 
 
 @router.get("/{materia_id}", response_model=MateriaOut)

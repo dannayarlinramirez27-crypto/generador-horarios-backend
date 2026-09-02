@@ -55,16 +55,21 @@ def list_docentes(
     activo: bool | None = None,
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
-    """Lista docentes; opcionalmente filtra por `activo`."""
-    query = f"SELECT * FROM {DOC_TABLE}"
-    params: list = []
-    if activo is not None:
-        query += " WHERE activo = %s"
-        params.append(activo)
-    query += " ORDER BY apellido, nombre"
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, params)
-        return [dict(r) for r in cur.fetchall()]
+    """Lista docentes; opcionalmente filtra por `activo`.
+    Si la tabla está vacía o hay error de BD, retorna [] con 200."""
+    try:
+        query = f"SELECT * FROM {DOC_TABLE}"
+        params: list = []
+        if activo is not None:
+            query += " WHERE activo = %s"
+            params.append(activo)
+        query += " ORDER BY apellido, nombre"
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"[ERROR list_docentes] {exc}")
+        return []
 
 
 @router.get("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(READ_ROLES))])
