@@ -13,6 +13,7 @@ from app.routers import (
     horarios,
     materias,
     salones,
+    seed,
 )
 from app.routers._common import db_error_to_response
 
@@ -113,3 +114,4 @@ app.include_router(materias.router, prefix="/api/v1")
 app.include_router(salones.router, prefix="/api/v1")
 app.include_router(asignaciones.router, prefix="/api/v1")
 app.include_router(horarios.router, prefix="/api/v1")
+app.include_router(seed.router, prefix="/api/v1")
