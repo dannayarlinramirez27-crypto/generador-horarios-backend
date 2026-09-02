@@ -782,77 +782,77 @@ class _Solver:
             }
         )
 
-    # Reporte de conflictos: solo si quedó algo sin resolver.
-    conflictos: list[dict] = []
-    sin_resolver = [v for v in self.vars if v.asignado is None]
-    for v in sin_resolver:
-        conflictos.append(
-            {
-                "tipo": "celda_no_planificada",
-                "curso_id": v.curso_id,
-                "curso": self.cur_nombre.get(v.curso_id, v.curso_id),
-                "materia_id": v.materia_id,
-                "materia": self.mat_nombre.get(v.materia_id, v.materia_id),
-                "motivo": self._razon_conflicto(v),
-            }
+        # Reporte de conflictos: solo si quedó algo sin resolver.
+        conflictos: list[dict] = []
+        sin_resolver = [v for v in self.vars if v.asignado is None]
+        for v in sin_resolver:
+            conflictos.append(
+                {
+                    "tipo": "celda_no_planificada",
+                    "curso_id": v.curso_id,
+                    "curso": self.cur_nombre.get(v.curso_id, v.curso_id),
+                    "materia_id": v.materia_id,
+                    "materia": self.mat_nombre.get(v.materia_id, v.materia_id),
+                    "motivo": self._razon_conflicto(v),
+                }
+            )
+        conflictos.sort(key=lambda c: c["curso"])
+
+        # Conteo fin de carga por docente para el reporte.
+        celdas_completas = self.fijas + celdas_nuevas
+        avisos: list[dict] = []
+        for doc in self.problem.docentes:
+            usados = self.bloques_usados.get(doc.id, 0)
+            cap = self.capacidad_bloques.get(doc.id, 0)
+            if usados > cap:
+                avisos.append(
+                    {
+                        "tipo": "carga_docente_excedida",
+                        "docente_id": doc.id,
+                        "docente": f"{doc.nombre} {doc.apellido}",
+                        "mensaje": f"Ocupa {usados} bloques; su contrato permite {cap}.",
+                    }
+                )
+
+        # Soft §4.3: materia con más de 2 bloques en un día (solo aviso, no bloquea).
+        mat_dia_viol = defaultdict(int)
+        for v in asignadas:
+            _d, _s, dia, _b = v.asignado
+            k = (v.curso_id, v.materia_id, dia)
+            mat_dia_viol[k] += 1
+        for (curso_id, materia_id, dia), count in sorted(mat_dia_viol.items()):
+            if count > MAX_BLOQUES_MATERIA_DIA:
+                avisos.append(
+                    {
+                        "tipo": "materia_dia_excedida",
+                        "curso_id": curso_id,
+                        "curso": self.cur_nombre.get(curso_id, curso_id),
+                        "materia_id": materia_id,
+                        "materia": self.mat_nombre.get(materia_id, materia_id),
+                        "dia": dia,
+                        "mensaje": (
+                            f"{self.mat_nombre.get(materia_id, materia_id)} del curso "
+                            f"{self.cur_nombre.get(curso_id, curso_id)} ocupa {count} "
+                            f"bloques el día {dia} (techo suave: {MAX_BLOQUES_MATERIA_DIA})."
+                        ),
+                    }
+                )
+
+        stats = {
+            "variables": len(self.vars),
+            "asignadas": len(asignadas),
+            "fijas": len(self.fijas),
+            "nodos_explorados": self.nodos,
+            "tiempo_seg": round(time.time() - self._t0, 4),
+        }
+        return ScheduleResult(
+            estado=tipo_gen,
+            completo=ha_completo,
+            celdas=aqui_celdas(celdas_completas),
+            conflictos=conflictos,
+            avisos=avisos,
+            statistics=stats,
         )
-    conflictos.sort(key=lambda c: c["curso"])
-
-    # Conteo fin de carga por docente para el reporte.
-    celdas_completas = self.fijas + celdas_nuevas
-    avisos: list[dict] = []
-    for doc in self.problem.docentes:
-        usados = self.bloques_usados.get(doc.id, 0)
-        cap = self.capacidad_bloques.get(doc.id, 0)
-        if usados > cap:
-            avisos.append(
-                {
-                    "tipo": "carga_docente_excedida",
-                    "docente_id": doc.id,
-                    "docente": f"{doc.nombre} {doc.apellido}",
-                    "mensaje": f"Ocupa {usados} bloques; su contrato permite {cap}.",
-                }
-            )
-
-    # Soft §4.3: materia con más de 2 bloques en un día (solo aviso, no bloquea).
-    mat_dia_viol = defaultdict(int)
-    for v in asignadas:
-        _d, _s, dia, _b = v.asignado
-        k = (v.curso_id, v.materia_id, dia)
-        mat_dia_viol[k] += 1
-    for (curso_id, materia_id, dia), count in sorted(mat_dia_viol.items()):
-        if count > MAX_BLOQUES_MATERIA_DIA:
-            avisos.append(
-                {
-                    "tipo": "materia_dia_excedida",
-                    "curso_id": curso_id,
-                    "curso": self.cur_nombre.get(curso_id, curso_id),
-                    "materia_id": materia_id,
-                    "materia": self.mat_nombre.get(materia_id, materia_id),
-                    "dia": dia,
-                    "mensaje": (
-                        f"{self.mat_nombre.get(materia_id, materia_id)} del curso "
-                        f"{self.cur_nombre.get(curso_id, curso_id)} ocupa {count} "
-                        f"bloques el día {dia} (techo suave: {MAX_BLOQUES_MATERIA_DIA})."
-                    ),
-                }
-            )
-
-    stats = {
-        "variables": len(self.vars),
-        "asignadas": len(asignadas),
-        "fijas": len(self.fijas),
-        "nodos_explorados": self.nodos,
-        "tiempo_seg": round(time.time() - self._t0, 4),
-    }
-    return ScheduleResult(
-        estado=tipo_gen,
-        completo=ha_completo,
-        celdas=aqui_celdas(celdas_completas),
-        conflictos=conflictos,
-        avisos=avisos,
-        statistics=stats,
-    )
 
     def _horas(self, dia: int, bloque: int) -> tuple[Any, Any]:
         sl = self.problem.jornada.slot(dia, bloque)
