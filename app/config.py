@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     supabase_url: SecretStr = SecretStr("")
     # Clave pública "anon" (frontend) o de servicio (backend), según el rol
     supabase_key: SecretStr = SecretStr("")
-    # Cadena de conexión del pooler de Postgres (usuaria de la base)
+    # Cadena de conexión directa a Postgres (puerto 5432)
     database_url: SecretStr = SecretStr("")
 
     # --- CORS: orígenes permitidos, separados por coma ---
@@ -46,13 +46,7 @@ class Settings(BaseSettings):
 
     @property
     def database_url_value(self) -> str:
-        url = self.database_url.get_secret_value()
-        # Desactiva el cache de prepared statements para evitar errores con
-        # el pooler de Supabase (connection pooler / pgbouncer).
-        if url and "prepared_statement_cache_size" not in url:
-            sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}prepared_statement_cache_size=0"
-        return url
+        return self.database_url.get_secret_value()
 
     @property
     def supabase_url_value(self) -> str:
