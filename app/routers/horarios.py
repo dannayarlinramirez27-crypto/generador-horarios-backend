@@ -188,10 +188,33 @@ def generar(
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
 
-    if not problem.cursos or not problem.materias or not problem.docentes:
+    # Validación granular: reportar exactamente qué datos faltan.
+    faltantes: list[str] = []
+    if not problem.cursos:
+        faltantes.append("cursos")
+    if not problem.materias:
+        faltantes.append("materias")
+    if not problem.docentes:
+        faltantes.append("docentes")
+    if not problem.salones:
+        faltantes.append("salones")
+    if not problem.cursos and not problem.materias:
+        faltantes.append("asignaciones de docentes a materias")
+    if not problem.cursos and not problem.docentes:
+        faltantes.append("asignaciones de docentes a cursos")
+
+    if faltantes:
+        mensaje = (
+            f"Faltan datos para generar el horario: {', '.join(faltantes)}. "
+            "Crea los registros necesarios antes de generar."
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Faltan datos para generar: carga cursos, materias, docentes y salones.",
+            detail={
+                "mensaje": mensaje,
+                "faltantes": faltantes,
+                "accion": "Completa los datos faltantes e intenta de nuevo.",
+            },
         )
 
     resultado = solve(problem)

@@ -1,5 +1,5 @@
 import psycopg
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -48,6 +48,27 @@ def root() -> dict:
     return {"app": settings.app_name, "docs": "/docs", "health": "/api/v1/health"}
 
 
+# CORS headers para respuestas de error (los handlers manuales bypassan el
+# middleware CORS de Starlette, así que los inyectamos explícitamente).
+_ORIGIN_ANY = "*"
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": _ORIGIN_ANY,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "*",
+    "Access-Control-Allow-Headers": "*",
+}
+
+
+def _cors_json_response(status_code: int, content: dict) -> JSONResponse:
+    """Devuelve JSONResponse con headers CORS para que el frontend en Vercel
+    pueda leer los mensajes de error en cualquier status (400, 409, 500...)."""
+    return JSONResponse(
+        status_code=status_code,
+        content=content,
+        headers=_CORS_HEADERS,
+    )
+
+
 # Exception handler global: convierte errores de psycopg/Postgres en
 # respuestas HTTP claras (400/409/500/503) — ver app/routers/_common.py.
 @app.exception_handler(psycopg.Error)
@@ -55,7 +76,19 @@ async def psycopg_exception_handler(
     request: Request, exc: psycopg.Error
 ) -> JSONResponse:
     status_code, detail = db_error_to_response(exc)
-    return JSONResponse(status_code=status_code, content={"detail": detail})
+    return _cors_json_response(status_code, {"detail": detail})
+
+
+# Handler para HTTPException (400, 403, 404, 409, 422…) con CORS headers.
+# Sin esto Vercel no puede leer el mensaje de error en preflight/requests.
+@app.exception_handler(HTTPException)
+async def http_exception_handler(
+    request: Request, exc: HTTPException
+) -> JSONResponse:
+    return _cors_json_response(
+        exc.status_code,
+        exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail},
+    )
 
 
 # Handler de último recurso: captura cualquier excepción no manejada para
@@ -65,9 +98,9 @@ async def psycopg_exception_handler(
 async def general_exception_handler(
     request: Request, exc: Exception
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Error interno del servidor: {str(exc)}"},
+    return _cors_json_response(
+        500,
+        {"detail": f"Error interno del servidor: {str(exc)}"},
     )
 
 
