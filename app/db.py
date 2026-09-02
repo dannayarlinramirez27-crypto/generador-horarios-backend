@@ -1,14 +1,7 @@
-from urllib.parse import urlparse
-
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
 from app.config import get_settings
-
-# Descompone la DATABASE_URL en parámetros explícitos para evitar que
-# psycopg (o el pooler) tenga que parsear query strings en la URI.
-# Esto evita problemas con prepared statements y parámetros extra en la URL.
-_url = urlparse(get_settings().database_url_value)
 
 # Pool de conexiones a Postgres/Supabase.
 # - `open=False` → el pool NO se conecta al importar la app: la primera
@@ -17,12 +10,7 @@ _url = urlparse(get_settings().database_url_value)
 # - Cada request toma una conexión del pool y la devuelve al terminar
 #   (dependency `get_db`).
 pool = ConnectionPool(
-    host=_url.hostname,
-    port=_url.port,
-    user=_url.username,
-    password=_url.password,
-    dbname=_url.path.lstrip('/'),
-    sslmode='require',
+    conninfo=get_settings().database_url_value,
     min_size=1,
     max_size=10,
     kwargs={"autocommit": True},
