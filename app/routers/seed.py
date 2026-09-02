@@ -4,13 +4,11 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import require_roles
 from app.db import get_db
 
 router = APIRouter(
     prefix="/seed",
     tags=["Seed"],
-    dependencies=[Depends(require_roles(["admin"]))],
 )
 
 
@@ -29,30 +27,20 @@ JORNADA_PRUEBA = {
 }
 
 DOCENTES_PRUEBA = [
-    {"nombre": "Ana", "apellido": "García", "documento": "12345678", "carga_horaria": 30, "activo": True},
-    {"nombre": "Carlos", "apellido": "López", "documento": "23456789", "carga_horaria": 30, "activo": True},
-    {"nombre": "María", "apellido": "Rodríguez", "documento": "34567890", "carga_horaria": 30, "activo": True},
-    {"nombre": "Pedro", "apellido": "Martínez", "documento": "45678901", "carga_horaria": 30, "activo": True},
-    {"nombre": "Laura", "apellido": "Sánchez", "documento": "56789012", "carga_horaria": 30, "activo": True},
+    {"nombre": "Ana García", "max_horas_semanales": 30},
+    {"nombre": "Carlos López", "max_horas_semanales": 30},
+    {"nombre": "María Rodríguez", "max_horas_semanales": 30},
 ]
 
 MATERIAS_PRUEBA = [
-    {"nombre": "Matemáticas", "categoria": "basica", "min_horas": 4, "max_horas": 5, "requiere_salon": False, "tipo_salon_requerido": None, "no_ultima_hora": False},
-    {"nombre": "Español", "categoria": "basica", "min_horas": 4, "max_horas": 5, "requiere_salon": False, "tipo_salon_requerido": None, "no_ultima_hora": False},
-    {"nombre": "Ciencias", "categoria": "basica", "min_horas": 3, "max_horas": 4, "requiere_salon": True, "tipo_salon_requerido": "laboratorio", "no_ultima_hora": False},
-    {"nombre": "Inglés", "categoria": "basica", "min_horas": 3, "max_horas": 4, "requiere_salon": False, "tipo_salon_requerido": None, "no_ultima_hora": False},
-    {"nombre": "Educación Física", "categoria": "otras", "min_horas": 2, "max_horas": 3, "requiere_salon": False, "tipo_salon_requerido": None, "no_ultima_hora": True},
+    {"nombre": "Matemáticas", "horas_semanales": 4},
+    {"nombre": "Español", "horas_semanales": 4},
+    {"nombre": "Ciencias", "horas_semanales": 4},
 ]
 
 CURSOS_PRUEBA = [
-    {"nombre": "6A", "nivel": "6to", "horas_semanales": 30, "orden": 1},
-    {"nombre": "6B", "nivel": "6to", "horas_semanales": 30, "orden": 2},
-]
-
-SALONES_PRUEBA = [
-    {"nombre": "Aula 101", "tipo": "aula", "capacidad": 30, "activo": True},
-    {"nombre": "Aula 102", "tipo": "aula", "capacidad": 30, "activo": True},
-    {"nombre": "Laboratorio", "tipo": "laboratorio", "capacidad": 25, "activo": True},
+    {"nombre": "6A", "nivel": 6, "orden": 1},
+    {"nombre": "6B", "nivel": 6, "orden": 2},
 ]
 
 
@@ -60,21 +48,30 @@ SALONES_PRUEBA = [
 def seed_data(
     conn: psycopg.Connection = Depends(get_db),
 ) -> dict:
-    """Inserta datos de prueba en la base de datos para probar la generación
-    de horarios. Requiere rol admin. Es idempotente: no falla si los datos
-    ya existen (ignora unique violations)."""
+    """Limpia e inserta datos de prueba mínimos para probar la generación de horarios."""
     resultados: dict = {}
 
     try:
         with conn.transaction():
-            # 1. Jornada (desactiva la anterior si existe)
+            # 1. Limpiar tablas hijas primero (FK constraints)
             with conn.cursor() as cur:
-                cur.execute("UPDATE configs SET activa = false WHERE activa = true")
+                cur.execute("DELETE FROM docente_materia")
+                cur.execute("DELETE FROM docente_curso")
+                cur.execute("DELETE FROM horarios_celdas")
+                cur.execute("DELETE FROM horarios")
+                cur.execute("DELETE FROM salones")
+                cur.execute("DELETE FROM docentes")
+                cur.execute("DELETE FROM materias")
+                cur.execute("DELETE FROM cursos")
+                cur.execute("DELETE FROM configs")
+            resultados["limpieza"] = "ok"
+
+            # 2. Jornada
+            with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO configs (nombre, tipo_jornada, dias_laborables, hora_inicio, hora_fin, minutos_bloque, activa)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING
                     """,
                     (
                         JORNADA_PRUEBA["nombre"],
@@ -88,79 +85,58 @@ def seed_data(
                 )
             resultados["jornada"] = "creada"
 
-            # 2. Docentes
+            # 3. Docentes
             docentes_ids: list[int] = []
             with conn.cursor(row_factory=dict_row) as cur:
                 for d in DOCENTES_PRUEBA:
                     cur.execute(
                         """
-                        INSERT INTO docentes (nombre, apellido, documento, carga_horaria, activo)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (documento) DO UPDATE SET nombre=EXCLUDED.nombre, apellido=EXCLUDED.apellido
+                        INSERT INTO docentes (nombre, max_horas_semanales, activo)
+                        VALUES (%s, %s, true)
                         RETURNING id
                         """,
-                        (d["nombre"], d["apellido"], d["documento"], d["carga_horaria"], d["activo"]),
+                        (d["nombre"], d["max_horas_semanales"]),
                     )
                     row = cur.fetchone()
                     if row:
                         docentes_ids.append(row["id"])
             resultados["docentes"] = len(docentes_ids)
 
-            # 3. Materias
+            # 4. Materias
             materias_ids: list[int] = []
             with conn.cursor(row_factory=dict_row) as cur:
                 for m in MATERIAS_PRUEBA:
                     cur.execute(
                         """
-                        INSERT INTO materias (nombre, categoria, min_horas, max_horas, requiere_salon, tipo_salon_requerido, no_ultima_hora)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (nombre) DO UPDATE SET categoria=EXCLUDED.categoria, min_horas=EXCLUDED.min_horas, max_horas=EXCLUDED.max_horas, requiere_salon=EXCLUDED.requiere_salon, tipo_salon_requerido=EXCLUDED.tipo_salon_requerido, no_ultima_hora=EXCLUDED.no_ultima_hora
+                        INSERT INTO materias (nombre, horas_semanales, activa)
+                        VALUES (%s, %s, true)
                         RETURNING id
                         """,
-                        (m["nombre"], m["categoria"], m["min_horas"], m["max_horas"], m["requiere_salon"], m["tipo_salon_requerido"], m["no_ultima_hora"]),
+                        (m["nombre"], m["horas_semanales"]),
                     )
                     row = cur.fetchone()
                     if row:
                         materias_ids.append(row["id"])
             resultados["materias"] = len(materias_ids)
 
-            # 4. Cursos
+            # 5. Cursos
             cursos_ids: list[int] = []
             with conn.cursor(row_factory=dict_row) as cur:
                 for c in CURSOS_PRUEBA:
                     cur.execute(
                         """
-                        INSERT INTO cursos (nombre, nivel, horas_semanales, orden)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (nombre) DO UPDATE SET nivel=EXCLUDED.nivel, horas_semanales=EXCLUDED.horas_semanales, orden=EXCLUDED.orden
+                        INSERT INTO cursos (nombre, nivel, orden)
+                        VALUES (%s, %s, %s)
                         RETURNING id
                         """,
-                        (c["nombre"], c["nivel"], c["horas_semanales"], c["orden"]),
+                        (c["nombre"], c["nivel"], c["orden"]),
                     )
                     row = cur.fetchone()
                     if row:
                         cursos_ids.append(row["id"])
             resultados["cursos"] = len(cursos_ids)
 
-            # 5. Salones
-            salones_ids: list[int] = []
-            with conn.cursor(row_factory=dict_row) as cur:
-                for s in SALONES_PRUEBA:
-                    cur.execute(
-                        """
-                        INSERT INTO salones (nombre, tipo, capacidad, activo)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (nombre) DO UPDATE SET tipo=EXCLUDED.tipo, capacidad=EXCLUDED.capacidad, activo=EXCLUDED.activo
-                        RETURNING id
-                        """,
-                        (s["nombre"], s["tipo"], s["capacidad"], s["activo"]),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        salones_ids.append(row["id"])
-            resultados["salones"] = len(salones_ids)
-
-            # 6. Asignaciones docente ↔ materia (todos los docentes a todas las materias)
+            # 6. Asignaciones docente ↔ materia
             asign_mat = 0
             with conn.cursor() as cur:
                 for doc_id in docentes_ids:
@@ -169,15 +145,13 @@ def seed_data(
                             """
                             INSERT INTO docente_materia (docente_id, materia_id)
                             VALUES (%s, %s)
-                            ON CONFLICT (docente_id, materia_id) DO NOTHING
                             """,
                             (doc_id, mat_id),
                         )
-                        if cur.rowcount > 0:
-                            asign_mat += 1
+                        asign_mat += 1
             resultados["asignaciones_materias"] = asign_mat
 
-            # 7. Asignaciones docente ↔ curso (todos los docentes a todos los cursos)
+            # 7. Asignaciones docente ↔ curso
             asign_cur = 0
             with conn.cursor() as cur:
                 for doc_id in docentes_ids:
@@ -186,12 +160,10 @@ def seed_data(
                             """
                             INSERT INTO docente_curso (docente_id, curso_id)
                             VALUES (%s, %s)
-                            ON CONFLICT (docente_id, curso_id) DO NOTHING
                             """,
                             (doc_id, cur_id),
                         )
-                        if cur.rowcount > 0:
-                            asign_cur += 1
+                        asign_cur += 1
             resultados["asignaciones_cursos"] = asign_cur
 
     except Exception as exc:
