@@ -910,7 +910,8 @@ def solve(problem: Problem, semilla: int | None = None) -> ScheduleResult:
                 break
             truncado_por_tiempo = True  # agotó la búsqueda sin completar
         except (NodeLimitReached, TimeLimitReached):
-            truncado_por_tiempo = True
+         truncado_por_tiempo = True
+         solver._deadline = time.time() + BACKTRACK_VENTANA_SEG
         if time.time() > deadline_global:
             break
 

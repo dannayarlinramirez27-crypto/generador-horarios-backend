@@ -64,32 +64,40 @@ def _insert_celdas(
     conn: psycopg.Connection, horario_id: int, celdas: list[dict]
 ) -> list[dict]:
     """Inserta las celdas generadas y devuelve las filas completas."""
-    filas: list[dict] = []
+    if not celdas:
+        return []
+
+    placeholder_group = "(" + ", ".join(["%s"] * 10) + ")"
+    values_sql = ", ".join([placeholder_group] * len(celdas))
+    params = tuple(
+        valor
+        for celda in celdas
+        for valor in (
+            horario_id,
+            celda["curso_id"],
+            celda["materia_id"],
+            celda["docente_id"],
+            celda["salon_id"],
+            celda["dia"],
+            celda["bloque"],
+            celda["hora_inicio"],
+            celda["hora_fin"],
+            celda.get("bloqueada", False),
+        )
+    )
+
     with conn.cursor(row_factory=dict_row) as cur:
-        for c in celdas:
-            cur.execute(
-                """
-                INSERT INTO celdas
-                    (horario_id, curso_id, materia_id, docente_id, salon_id,
-                     dia, bloque, hora_inicio, hora_fin, bloqueada)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING *
-                """,
-                (
-                    horario_id,
-                    c["curso_id"],
-                    c["materia_id"],
-                    c["docente_id"],
-                    c["salon_id"],
-                    c["dia"],
-                    c["bloque"],
-                    c["hora_inicio"],
-                    c["hora_fin"],
-                    c.get("bloqueada", False),
-                ),
-            )
-            filas.append(dict(cur.fetchone()))
-    return filas
+        cur.execute(
+            f"""
+            INSERT INTO celdas
+                (horario_id, curso_id, materia_id, docente_id, salon_id,
+                 dia, bloque, hora_inicio, hora_fin, bloqueada)
+            VALUES {values_sql}
+            RETURNING *
+            """,
+            params,
+        )
+        return [dict(fila) for fila in cur.fetchall()]
 
 
 def _load_horario(conn: psycopg.Connection, horario_id: int, usuario_id: str) -> dict:
