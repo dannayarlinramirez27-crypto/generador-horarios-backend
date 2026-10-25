@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.routers import (
     asignaciones,
+    auth,
     configs,
     cursos,
     docentes,
@@ -106,6 +107,7 @@ async def general_exception_handler(
 
 # Routers bajo el prefijo /api/v1
 app.include_router(health.router, prefix="/api/v1")
+app.include_router(auth.router, prefix="/api/v1")
 app.include_router(configs.router, prefix="/api/v1")
 app.include_router(docentes.router, prefix="/api/v1")
 app.include_router(cursos.router, prefix="/api/v1")

@@ -10,7 +10,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.asignaciones import (
     DocenteMateriaCreate,
@@ -25,6 +25,7 @@ router = APIRouter(
     tags=["Asignaciones"],
     dependencies=[Depends(get_current_user)],
 )
+ADMIN_ONLY = ["admin"]
 
 
 def _docente_existe(conn, docente_id: int) -> None:
@@ -42,7 +43,7 @@ def _docente_existe(conn, docente_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/materias", response_model=list[DocenteMateriaOut])
+@router.get("/materias", response_model=list[DocenteMateriaOut], dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def list_docente_materias(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
@@ -52,7 +53,7 @@ def list_docente_materias(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/materias/{docente_id}", response_model=list[DocenteMateriaOut])
+@router.get("/materias/{docente_id}", response_model=list[DocenteMateriaOut], dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def list_materias_de_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -80,6 +81,7 @@ def list_materias_de_docente(
     "/materias",
     response_model=DocenteMateriaOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles(ADMIN_ONLY))],
 )
 def assign_materia_a_docente(
     payload: DocenteMateriaCreate,
@@ -107,7 +109,7 @@ def assign_materia_a_docente(
         ) from exc
 
 
-@router.delete("/materias/{docente_id}/{materia_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/materias/{docente_id}/{materia_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def unassign_materia_de_docente(
     docente_id: int,
     materia_id: int,
@@ -140,7 +142,7 @@ def unassign_materia_de_docente(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/cursos", response_model=list[DocenteCursoOut])
+@router.get("/cursos", response_model=list[DocenteCursoOut], dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def list_docente_cursos(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
@@ -150,7 +152,7 @@ def list_docente_cursos(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/cursos/{docente_id}", response_model=list[DocenteCursoOut])
+@router.get("/cursos/{docente_id}", response_model=list[DocenteCursoOut], dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def list_cursos_de_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -178,6 +180,7 @@ def list_cursos_de_docente(
     "/cursos",
     response_model=DocenteCursoOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles(ADMIN_ONLY))],
 )
 def assign_curso_a_docente(
     payload: DocenteCursoCreate,
@@ -205,7 +208,7 @@ def assign_curso_a_docente(
         ) from exc
 
 
-@router.delete("/cursos/{docente_id}/{curso_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/cursos/{docente_id}/{curso_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def unassign_curso_de_docente(
     docente_id: int,
     curso_id: int,

@@ -4,7 +4,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.salones import SalonCreate, SalonUpdate, SalonOut
 from app.routers._common import build_update_statement, raise_db_error
@@ -16,6 +16,7 @@ router = APIRouter(
 )
 
 TABLE = "salones"
+ADMIN_ONLY = ["admin"]
 
 
 @router.get("", response_model=list[SalonOut])
@@ -35,7 +36,7 @@ def list_salones(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/{salon_id}", response_model=SalonOut)
+@router.get("/{salon_id}", response_model=SalonOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
 def get_salon(
     salon_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -52,7 +53,7 @@ def get_salon(
     return dict(row)
 
 
-@router.post("", response_model=SalonOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=SalonOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def create_salon(
     payload: SalonCreate,
     conn: psycopg.Connection = Depends(get_db),
@@ -74,7 +75,7 @@ def create_salon(
         raise_db_error(exc)
 
 
-@router.put("/{salon_id}", response_model=SalonOut)
+@router.put("/{salon_id}", response_model=SalonOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def update_salon(
     salon_id: int,
     payload: SalonUpdate,
@@ -93,7 +94,7 @@ def update_salon(
         raise_db_error(exc)
 
 
-@router.delete("/{salon_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{salon_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def delete_salon(
     salon_id: int,
     conn: psycopg.Connection = Depends(get_db),

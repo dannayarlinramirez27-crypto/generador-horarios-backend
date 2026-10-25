@@ -10,7 +10,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user, require_roles
+from app.auth import get_current_user, require_docente_access, require_roles
 from app.db import get_db
 from app.models.docentes import DocenteCreate, DocenteUpdate, DocenteOut
 from app.models.disponibilidades import (
@@ -72,7 +72,7 @@ def list_docentes(
         return []
 
 
-@router.get("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(READ_ROLES))])
+@router.get("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
 def get_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -113,7 +113,7 @@ def create_docente(
         raise_db_error(exc)
 
 
-@router.put("/{docente_id}", response_model=DocenteOut)
+@router.put("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def update_docente(
     docente_id: int,
     payload: DocenteUpdate,
@@ -132,7 +132,7 @@ def update_docente(
         raise_db_error(exc)
 
 
-@router.delete("/{docente_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{docente_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def delete_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -151,7 +151,7 @@ def delete_docente(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{docente_id}/disponibilidades", response_model=list[DisponibilidadOut])
+@router.get("/{docente_id}/disponibilidades", response_model=list[DisponibilidadOut], dependencies=[Depends(require_docente_access())])
 def list_disponibilidades(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -170,6 +170,7 @@ def list_disponibilidades(
     "/{docente_id}/disponibilidades",
     response_model=DisponibilidadOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_docente_access())],
 )
 def create_disponibilidad(
     docente_id: int,
@@ -197,6 +198,7 @@ def create_disponibilidad(
 @router.delete(
     "/{docente_id}/disponibilidades/{disp_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_docente_access())],
 )
 def delete_disponibilidad(
     docente_id: int,

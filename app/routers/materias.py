@@ -7,7 +7,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.materias import MateriaCreate, MateriaUpdate, MateriaOut
 from app.routers._common import build_update_statement, raise_db_error
@@ -19,6 +19,7 @@ router = APIRouter(
 )
 
 TABLE = "materias"
+MANAGE_ROLES = ["admin", "docente"]
 
 
 @router.get("", response_model=list[MateriaOut])
@@ -36,7 +37,7 @@ def list_materias(
         return []
 
 
-@router.get("/{materia_id}", response_model=MateriaOut)
+@router.get("/{materia_id}", response_model=MateriaOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
 def get_materia(
     materia_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -53,7 +54,7 @@ def get_materia(
     return dict(row)
 
 
-@router.post("", response_model=MateriaOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=MateriaOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MANAGE_ROLES))])
 def create_materia(
     payload: MateriaCreate,
     conn: psycopg.Connection = Depends(get_db),
@@ -85,7 +86,7 @@ def create_materia(
         raise_db_error(exc)
 
 
-@router.put("/{materia_id}", response_model=MateriaOut)
+@router.put("/{materia_id}", response_model=MateriaOut, dependencies=[Depends(require_roles(MANAGE_ROLES))])
 def update_materia(
     materia_id: int,
     payload: MateriaUpdate,
@@ -104,7 +105,7 @@ def update_materia(
         raise_db_error(exc)
 
 
-@router.delete("/{materia_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{materia_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(MANAGE_ROLES))])
 def delete_materia(
     materia_id: int,
     conn: psycopg.Connection = Depends(get_db),

@@ -4,7 +4,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.cursos import CursoCreate, CursoUpdate, CursoOut
 from app.routers._common import build_update_statement, raise_db_error
@@ -16,6 +16,7 @@ router = APIRouter(
 )
 
 TABLE = "cursos"
+ADMIN_ONLY = ["admin"]
 
 
 @router.get("", response_model=list[CursoOut])
@@ -33,7 +34,7 @@ def list_cursos(
         return []
 
 
-@router.get("/{curso_id}", response_model=CursoOut)
+@router.get("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
 def get_curso(
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -50,7 +51,7 @@ def get_curso(
     return dict(row)
 
 
-@router.post("", response_model=CursoOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=CursoOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def create_curso(
     payload: CursoCreate,
     conn: psycopg.Connection = Depends(get_db),
@@ -72,7 +73,7 @@ def create_curso(
         raise_db_error(exc)
 
 
-@router.put("/{curso_id}", response_model=CursoOut)
+@router.put("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def update_curso(
     curso_id: int,
     payload: CursoUpdate,
@@ -91,7 +92,7 @@ def update_curso(
         raise_db_error(exc)
 
 
-@router.delete("/{curso_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{curso_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def delete_curso(
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),

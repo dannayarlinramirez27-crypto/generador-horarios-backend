@@ -15,9 +15,9 @@ por cada request.
 RBAC (Role-Based Access Control):
 - `require_roles(allowed_roles)`: dependencia que valida el token y extrae el rol.
 - Roles del sistema:
-  - "admin": Acceso total (crear, editar, generar y ver horarios).
-  - "docente": Solo lectura de los horarios donde esté asignado.
-  - "estudiante": Solo lectura del horario perteneciente a su curso.
+  - "admin": Acceso total.
+  - "docente": Gestiona materias, su disponibilidad y genera horarios.
+  - "estudiante": Solo lectura y validación de horarios.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ from psycopg.rows import dict_row
 
 from app.config import get_settings
 from app.db import get_db
+
+ROLES_VALIDOS = {"admin", "docente", "estudiante"}
 
 # ---------------------------------------------------------------------------
 # Cache de JWKS (Json Web Key Set) de Supabase
@@ -122,23 +124,18 @@ def get_current_user(
 
 
 def _extract_role_from_claims(claims: dict[str, Any]) -> str:
-    """Extrae el rol desde los claims del JWT de Supabase.
+    """Extrae el rol de los claims gestionados por el servidor.
 
     NUNCA lee el claim `role` de nivel superior porque Supabase siempre
     lo envía como "authenticated" (rol interno de Auth, no nuestro RBAC).
 
-    Busca en orden:
-    1. `user_metadata.role` (custom claims del signup)
-    2. `app_metadata.role` (claims administrativos de Supabase)
-    3. Default: "estudiante" (rol menos privilegiado)
+    `user_metadata` puede ser editado por el propio usuario y nunca concede
+    permisos. `app_metadata` solo puede ser escrito por código de confianza.
     """
-    user_meta = claims.get("user_metadata", {})
-    if isinstance(user_meta, dict) and user_meta.get("role"):
-        return str(user_meta["role"])
-
     app_meta = claims.get("app_metadata", {})
-    if isinstance(app_meta, dict) and app_meta.get("role"):
-        return str(app_meta["role"])
+    role = app_meta.get("role") if isinstance(app_meta, dict) else None
+    if isinstance(role, str) and role in ROLES_VALIDOS:
+        return str(role)
 
     return "estudiante"
 
@@ -174,7 +171,7 @@ def _extract_role(
     """Extrae el rol del usuario. Prioridad:
 
     1. Tabla `public.perfiles` (base de datos, fuente de verdad).
-    2. Claims del JWT (user_metadata/app_metadata).
+    2. `app_metadata` del JWT (claims gestionados por el servidor).
     3. Fallback por email: dannayarlinramirez0827@gmail.com → admin.
     4. Default: "estudiante" (rol menos privilegiado).
     """
@@ -195,6 +192,81 @@ def _extract_role(
     return "estudiante"
 
 
+def _extract_docente_id_from_email(
+    conn: psycopg.Connection, email: str | None
+) -> int | None:
+    """Resuelve un registro docente mediante el email verificado del JWT.
+
+    Si el email es nulo, no hay coincidencia o hay más de una coincidencia
+    ignorando mayúsculas, se falla de forma cerrada.
+    """
+    if not email:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM docentes WHERE LOWER(email) = LOWER(%s)",
+                (email,),
+            )
+            rows = cur.fetchall()
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        return int(row["id"] if isinstance(row, dict) else row[0])
+    except Exception:
+        return None
+
+
+def ensure_role_allowed(role: str, allowed_roles: list[str]) -> None:
+    """Lanza 403 cuando el rol resuelto no pertenece a la lista permitida."""
+    if role not in allowed_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Acceso denegado: se requiere uno de los roles {allowed_roles}, tienes '{role}'.",
+        )
+
+
+def ensure_docente_access(
+    role: str, requested_docente_id: int, linked_docente_id: int | None
+) -> None:
+    """Permite a admin cualquier registro y a docentes solo su propio registro."""
+    if role == "admin":
+        return
+    if role != "docente":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: solo admin y docente pueden gestionar disponibilidades.",
+        )
+    if linked_docente_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tu cuenta docente no está vinculada a un registro por email. Contacta con un administrador.",
+        )
+    if requested_docente_id != linked_docente_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo puedes gestionar tu propia disponibilidad docente.",
+        )
+
+
+def require_docente_access():
+    """Dependencia de autorización para disponibilidad docente propia o admin."""
+    def _check_docente_access(
+        docente_id: int,
+        usuario: dict[str, Any] = Depends(get_current_user),
+        conn: psycopg.Connection = Depends(get_db),
+    ) -> None:
+        role = _extract_role(usuario, conn)
+        linked_id = (
+            _extract_docente_id_from_email(conn, usuario.get("email"))
+            if role == "docente"
+            else None
+        )
+        ensure_docente_access(role, docente_id, linked_id)
+
+    return _check_docente_access
+
+
 def get_current_user_role(
     usuario: dict[str, Any] = Depends(get_current_user),
     conn: psycopg.Connection = Depends(get_db),
@@ -202,7 +274,7 @@ def get_current_user_role(
     """Dependencia que devuelve el rol del usuario autenticado.
 
     Consulta primero la tabla `public.perfiles` en la base de datos;
-    si no hay registro, cae al fallback de los claims del JWT.
+    si no hay registro, cae a `app_metadata` gestionado por el servidor.
     """
     return _extract_role(usuario, conn)
 
@@ -221,10 +293,6 @@ def require_roles(allowed_roles: list[str]):
         conn: psycopg.Connection = Depends(get_db),
     ) -> dict[str, Any]:
         role = _extract_role(usuario, conn)
-        if role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Acceso denegado: se requiere uno de los roles {allowed_roles}, tienes '{role}'.",
-            )
+        ensure_role_allowed(role, allowed_roles)
         return usuario
     return _check_role

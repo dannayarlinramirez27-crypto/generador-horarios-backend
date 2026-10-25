@@ -18,7 +18,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import get_current_user, require_roles
+from app.auth import _extract_role, get_current_user, require_roles
 from app.db import get_db
 from app.models.celdas import CeldaOut
 from app.models.horarios import HorarioOut
@@ -33,6 +33,7 @@ router = APIRouter(
 # Roles permitidos por operación
 ADMIN_ONLY = ["admin"]
 READ_ROLES = ["admin", "docente", "estudiante"]
+GENERATION_ROLES = ["admin", "docente"]
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +101,18 @@ def _insert_celdas(
         return [dict(fila) for fila in cur.fetchall()]
 
 
-def _load_horario(conn: psycopg.Connection, horario_id: int, usuario_id: str) -> dict:
-    """Devuelve un horario solo si pertenece al usuario (404 en caso contrario)."""
+def _load_horario(
+    conn: psycopg.Connection, horario_id: int, usuario_id: str, role: str = "estudiante"
+) -> dict:
+    """Return owned schedules for docentes and shared schedules for admin/students."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM horarios WHERE id = %s AND usuario_id = %s",
-            (horario_id, usuario_id),
-        )
+        if role in ("admin", "estudiante"):
+            cur.execute("SELECT * FROM horarios WHERE id = %s", (horario_id,))
+        else:
+            cur.execute(
+                "SELECT * FROM horarios WHERE id = %s AND usuario_id = %s",
+                (horario_id, usuario_id),
+            )
         row = cur.fetchone()
     if row is None:
         raise HTTPException(
@@ -174,7 +180,7 @@ def _recalcular_estado(conn: psycopg.Connection, horario_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/generar", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.post("/generar", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(GENERATION_ROLES))])
 def generar(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
@@ -189,6 +195,7 @@ def generar(
         configuración; en caso contrario usa la configuración activa.
     """
     usuario_id = usuario["sub"]
+    role = _extract_role(usuario, conn)
     nombre = str(payload.get("nombre", "Horario"))
     horario_id = payload.get("horario_id")
 
@@ -233,7 +240,7 @@ def generar(
                 # Regeneración: conservamos el id, limpiamos celdas y volvemos
                 # a estado "borrador" (el trigger de completitud se dispara al
                 # transitar a "completo", DESPUÉS de reinsertar las celdas).
-                _load_horario(conn, horario_id, usuario_id)
+                _load_horario(conn, horario_id, usuario_id, role)
                 with conn.cursor() as cur:
                     cur.execute(
                         "DELETE FROM celdas WHERE horario_id = %s",
@@ -257,7 +264,7 @@ def generar(
                     "UPDATE horarios SET estado = %s WHERE id = %s",
                     (resultado.estado, horario_id),
                 )
-            horario = _load_horario(conn, horario_id, usuario_id)
+            horario = _load_horario(conn, horario_id, usuario_id, role)
             horario["estado"] = resultado.estado
     except psycopg.Error as exc:
         # Los triggers del esquema (sch_celda_validar, sch_horario_validar)
@@ -333,13 +340,17 @@ def list_horarios(
     conn: psycopg.Connection = Depends(get_db),
     usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """Lista los horarios del usuario actual (más recientes primero)."""
+    """List shared schedules for admin/students and owned schedules for docentes."""
     usuario_id = usuario["sub"]
+    role = _extract_role(usuario, conn)
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM horarios WHERE usuario_id = %s ORDER BY id DESC",
-            (usuario_id,),
-        )
+        if role in ("admin", "estudiante"):
+            cur.execute("SELECT * FROM horarios ORDER BY id DESC")
+        else:
+            cur.execute(
+                "SELECT * FROM horarios WHERE usuario_id = %s ORDER BY id DESC",
+                (usuario_id,),
+            )
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -351,7 +362,8 @@ def get_horario(
 ) -> dict:
     """Devuelve un horario con todas sus celdas (solo si es del usuario)."""
     usuario_id = usuario["sub"]
-    horario = _load_horario(conn, horario_id, usuario_id)
+    role = _extract_role(usuario, conn)
+    horario = _load_horario(conn, horario_id, usuario_id, role)
     celdas = _load_celdas_de(conn, horario_id)
     return {"horario": horario, "celdas": celdas}
 
@@ -373,8 +385,9 @@ def validar_horario(
     mensaje). Si la lista está vacía → horario válido.
     """
     usuario_id = usuario["sub"]
+    role = _extract_role(usuario, conn)
     horario_id = payload.get("horario_id")
-    _load_horario(conn, horario_id, usuario_id)
+    _load_horario(conn, horario_id, usuario_id, role)
     celdas = _load_celdas_de(conn, horario_id)
 
     problem, error = load_problem(conn, horario_id)
@@ -427,7 +440,7 @@ def editar_celda(
     """
     usuario_id = usuario["sub"]
     # Verificar ownership del horario antes de cualquier operación.
-    _load_horario(conn, horario_id, usuario_id)
+    _load_horario(conn, horario_id, usuario_id, "admin")
 
     celda_id = payload.get("celda_id")
     curso_id = payload.get("curso_id")
@@ -575,7 +588,7 @@ def vaciar_curso(
 ) -> dict:
     """Elimina únicamente las celdas de un curso dentro del horario."""
     usuario_id = usuario["sub"]
-    _load_horario(conn, horario_id, usuario_id)
+    _load_horario(conn, horario_id, usuario_id, "admin")
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
@@ -606,7 +619,7 @@ def borrar_celda(
     y persiste el estado del horario (`_recalcular_estado`) y lo devuelve.
     """
     usuario_id = usuario["sub"]
-    _load_horario(conn, horario_id, usuario_id)
+    _load_horario(conn, horario_id, usuario_id, "admin")
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "DELETE FROM celdas WHERE id = %s AND horario_id = %s RETURNING *",
