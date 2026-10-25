@@ -19,11 +19,10 @@ router = APIRouter(
 )
 
 TABLE = "materias"
-MANAGE_ROLES = ["admin", "docente"]
-READ_ROLES = ["admin", "docente"]
+MODULE_ROLES = ["admin", "docente"]
 
 
-@router.get("", response_model=list[MateriaOut], dependencies=[Depends(require_roles(READ_ROLES))])
+@router.get("", response_model=list[MateriaOut], dependencies=[Depends(require_roles(MODULE_ROLES))])
 def list_materias(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
@@ -38,7 +37,7 @@ def list_materias(
         return []
 
 
-@router.get("/{materia_id}", response_model=MateriaOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
+@router.get("/{materia_id}", response_model=MateriaOut, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def get_materia(
     materia_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -55,7 +54,7 @@ def get_materia(
     return dict(row)
 
 
-@router.post("", response_model=MateriaOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MANAGE_ROLES))])
+@router.post("", response_model=MateriaOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def create_materia(
     payload: MateriaCreate,
     conn: psycopg.Connection = Depends(get_db),
@@ -87,7 +86,7 @@ def create_materia(
         raise_db_error(exc)
 
 
-@router.put("/{materia_id}", response_model=MateriaOut, dependencies=[Depends(require_roles(MANAGE_ROLES))])
+@router.put("/{materia_id}", response_model=MateriaOut, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def update_materia(
     materia_id: int,
     payload: MateriaUpdate,
@@ -106,7 +105,7 @@ def update_materia(
         raise_db_error(exc)
 
 
-@router.delete("/{materia_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(MANAGE_ROLES))])
+@router.delete("/{materia_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def delete_materia(
     materia_id: int,
     conn: psycopg.Connection = Depends(get_db),

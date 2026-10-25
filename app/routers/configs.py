@@ -22,7 +22,7 @@ router = APIRouter(
 )
 
 TABLE = "configs"
-ADMIN_ONLY = ["admin"]
+MODULE_ROLES = ["admin", "docente"]
 
 
 def _fetch_or_404(conn, config_id: int) -> dict:
@@ -37,7 +37,7 @@ def _fetch_or_404(conn, config_id: int) -> dict:
     return dict(row)
 
 
-@router.get("", response_model=list[ConfigOut], dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.get("", response_model=list[ConfigOut], dependencies=[Depends(require_roles(MODULE_ROLES))])
 def list_configs(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
@@ -50,7 +50,7 @@ def list_configs(
 @router.get(
     "/activa",
     response_model=ConfigOut | None,
-    dependencies=[Depends(require_roles(["admin", "docente"]))],
+    dependencies=[Depends(require_roles(MODULE_ROLES))],
 )
 def get_active_config(
     conn: psycopg.Connection = Depends(get_db),
@@ -62,7 +62,7 @@ def get_active_config(
     return dict(row) if row else None
 
 
-@router.get("/{config_id}", response_model=ConfigOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.get("/{config_id}", response_model=ConfigOut, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def get_config(
     config_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -71,7 +71,7 @@ def get_config(
     return _fetch_or_404(conn, config_id)
 
 
-@router.post("", response_model=ConfigOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.post("", response_model=ConfigOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def create_config(
     payload: ConfigCreate,
     conn: psycopg.Connection = Depends(get_db),
@@ -111,7 +111,7 @@ def create_config(
         raise_db_error(exc)
 
 
-@router.put("/{config_id}", response_model=ConfigOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.put("/{config_id}", response_model=ConfigOut, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def update_config(
     config_id: int,
     payload: ConfigUpdate,
@@ -141,7 +141,7 @@ def update_config(
         raise_db_error(exc)
 
 
-@router.delete("/{config_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.delete("/{config_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def delete_config(
     config_id: int,
     conn: psycopg.Connection = Depends(get_db),

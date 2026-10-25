@@ -16,11 +16,10 @@ router = APIRouter(
 )
 
 TABLE = "cursos"
-ADMIN_ONLY = ["admin"]
-READ_ROLES = ["admin", "docente"]
+MODULE_ROLES = ["admin", "docente"]
 
 
-@router.get("", response_model=list[CursoOut], dependencies=[Depends(require_roles(READ_ROLES))])
+@router.get("", response_model=list[CursoOut], dependencies=[Depends(require_roles(MODULE_ROLES))])
 def list_cursos(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
@@ -35,7 +34,7 @@ def list_cursos(
         return []
 
 
-@router.get("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.get("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def get_curso(
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),
@@ -52,7 +51,7 @@ def get_curso(
     return dict(row)
 
 
-@router.post("", response_model=CursoOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.post("", response_model=CursoOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def create_curso(
     payload: CursoCreate,
     conn: psycopg.Connection = Depends(get_db),
@@ -74,7 +73,7 @@ def create_curso(
         raise_db_error(exc)
 
 
-@router.put("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.put("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def update_curso(
     curso_id: int,
     payload: CursoUpdate,
@@ -93,7 +92,7 @@ def update_curso(
         raise_db_error(exc)
 
 
-@router.delete("/{curso_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.delete("/{curso_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def delete_curso(
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),

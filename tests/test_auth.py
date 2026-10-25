@@ -1,16 +1,37 @@
 """Focused tests for trusted role resolution and docente authorization."""
 
+from inspect import getclosurevars
+
 import pytest
 from fastapi import HTTPException
+from fastapi.routing import APIRoute
 
 from app.auth import (
-    _extract_docente_id_from_email,
+    ROLES_VALIDOS,
     _extract_role,
     _extract_role_from_claims,
-    ensure_docente_access,
     ensure_role_allowed,
 )
+from app.routers import (
+    asignaciones,
+    configs,
+    cursos,
+    docentes,
+    horarios,
+    materias,
+    salones,
+)
 from app.routers.horarios import READ_ROLES, _load_horario
+
+MODULE_ROUTERS = (
+    configs.router,
+    docentes.router,
+    asignaciones.router,
+    cursos.router,
+    materias.router,
+    salones.router,
+    horarios.router,
+)
 
 
 class _ProfileCursor:
@@ -36,34 +57,6 @@ class _ProfileConnection:
         self.cursor_instance = _ProfileCursor(row)
 
     def cursor(self, row_factory=None):
-        return self.cursor_instance
-
-
-class _DocenteCursor:
-    def __init__(self, rows):
-        self.rows = rows
-        self.sql = None
-        self.params = None
-
-    def execute(self, sql, params):
-        self.sql = sql
-        self.params = params
-
-    def fetchall(self):
-        return self.rows
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-
-class _DocenteConnection:
-    def __init__(self, rows):
-        self.cursor_instance = _DocenteCursor(rows)
-
-    def cursor(self):
         return self.cursor_instance
 
 
@@ -125,6 +118,10 @@ def test_unknown_role_claims_fail_closed():
     assert _extract_role_from_claims({"app_metadata": {"role": "visitor"}}) == "desconocido"
 
 
+def test_only_admin_and_docente_are_valid_roles():
+    assert ROLES_VALIDOS == {"admin", "docente"}
+
+
 def test_database_profile_role_precedes_app_metadata():
     claims = {"sub": "user-1", "app_metadata": {"role": "admin"}}
     assert _extract_role(claims, _ProfileConnection({"rol": "docente"})) == "docente"
@@ -140,57 +137,41 @@ def test_all_roles_can_read_and_validate_schedules(role):
     ensure_role_allowed(role, READ_ROLES)
 
 
-@pytest.mark.parametrize(
-    ("role", "allowed", "permitted"),
-    [
-        ("admin", ["admin"], True),
-        ("docente", ["admin", "docente"], True),
-        ("desconocido", ["admin", "docente"], False),
-        ("docente", ["admin"], False),
-    ],
-)
-def test_role_authorization_matrix(role, allowed, permitted):
-    if permitted:
-        ensure_role_allowed(role, allowed)
-    else:
-        with pytest.raises(HTTPException) as exc:
-            ensure_role_allowed(role, allowed)
-        assert exc.value.status_code == 403
+def _role_guards(dependant):
+    guards = []
+    for dependency in dependant.dependencies:
+        call = dependency.call
+        if getattr(call, "__name__", None) == "_check_role":
+            allowed_roles = getclosurevars(call).nonlocals["allowed_roles"]
+            guards.append(allowed_roles)
+        guards.extend(_role_guards(dependency))
+    return guards
 
 
-def test_admin_can_manage_any_docente_availability():
-    ensure_docente_access("admin", requested_docente_id=42, linked_docente_id=None)
+@pytest.mark.parametrize("role", ["admin", "docente"])
+def test_both_roles_can_use_every_module_endpoint(role):
+    for router in MODULE_ROUTERS:
+        endpoints = [route for route in router.routes if isinstance(route, APIRoute)]
+        assert endpoints, f"{router.prefix} should expose module endpoints"
+        for endpoint in endpoints:
+            guards = _role_guards(endpoint.dependant)
+            assert guards, f"{endpoint.path} has no role guard"
+            assert all({"admin", "docente"}.issubset(guard) for guard in guards), (
+                f"{role} must be permitted for {endpoint.path}"
+            )
+            for guard in guards:
+                ensure_role_allowed(role, guard)
 
 
-def test_docente_can_manage_only_the_email_linked_record():
-    ensure_docente_access("docente", requested_docente_id=42, linked_docente_id=42)
-    with pytest.raises(HTTPException) as exc:
-        ensure_docente_access("docente", requested_docente_id=43, linked_docente_id=42)
-    assert exc.value.status_code == 403
-
-
-def test_unlinked_docente_is_denied_with_clear_error():
-    with pytest.raises(HTTPException) as exc:
-        ensure_docente_access("docente", requested_docente_id=42, linked_docente_id=None)
-    assert exc.value.status_code == 403
-    assert "no está vinculada" in exc.value.detail
-
-
-def test_unknown_role_cannot_manage_docente_availability():
-    with pytest.raises(HTTPException) as exc:
-        ensure_docente_access("desconocido", requested_docente_id=42, linked_docente_id=42)
-    assert exc.value.status_code == 403
-
-
-def test_email_lookup_is_case_insensitive_and_requires_a_unique_match():
-    conn = _DocenteConnection([{"id": 42}])
-    assert _extract_docente_id_from_email(conn, "Teacher@school.edu") == 42
-    assert "LOWER(email) = LOWER(%s)" in conn.cursor_instance.sql
-    assert conn.cursor_instance.params == ("Teacher@school.edu",)
-    assert _extract_docente_id_from_email(_DocenteConnection([]), "teacher@school.edu") is None
-    assert _extract_docente_id_from_email(
-        _DocenteConnection([{"id": 42}, {"id": 43}]), "teacher@school.edu"
-    ) is None
+def test_unknown_role_cannot_use_any_module_endpoint():
+    for router in MODULE_ROUTERS:
+        for endpoint in router.routes:
+            if not isinstance(endpoint, APIRoute):
+                continue
+            for guard in _role_guards(endpoint.dependant):
+                with pytest.raises(HTTPException) as exc:
+                    ensure_role_allowed("desconocido", guard)
+                assert exc.value.status_code == 403
 
 
 def test_admin_can_read_shared_schedules():

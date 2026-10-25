@@ -16,7 +16,7 @@ RBAC (Role-Based Access Control):
 - `require_roles(allowed_roles)`: dependencia que valida el token y extrae el rol.
 - Roles del sistema:
   - "admin": Acceso total.
-  - "docente": Gestiona materias, su disponibilidad y genera horarios.
+  - "docente": Puede gestionar los módulos habilitados y sus propios horarios.
 """
 
 from __future__ import annotations
@@ -201,31 +201,6 @@ def _extract_role(
     return ROL_DESCONOCIDO
 
 
-def _extract_docente_id_from_email(
-    conn: psycopg.Connection, email: str | None
-) -> int | None:
-    """Resuelve un registro docente mediante el email verificado del JWT.
-
-    Si el email es nulo, no hay coincidencia o hay más de una coincidencia
-    ignorando mayúsculas, se falla de forma cerrada.
-    """
-    if not email:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id FROM docentes WHERE LOWER(email) = LOWER(%s)",
-                (email,),
-            )
-            rows = cur.fetchall()
-        if len(rows) != 1:
-            return None
-        row = rows[0]
-        return int(row["id"] if isinstance(row, dict) else row[0])
-    except Exception:
-        return None
-
-
 def ensure_role_allowed(role: str, allowed_roles: list[str]) -> None:
     """Lanza 403 cuando el rol resuelto no pertenece a la lista permitida."""
     if role not in allowed_roles:
@@ -233,47 +208,6 @@ def ensure_role_allowed(role: str, allowed_roles: list[str]) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Acceso denegado: se requiere uno de los roles {allowed_roles}, tienes '{role}'.",
         )
-
-
-def ensure_docente_access(
-    role: str, requested_docente_id: int, linked_docente_id: int | None
-) -> None:
-    """Permite a admin cualquier registro y a docentes solo su propio registro."""
-    if role == "admin":
-        return
-    if role != "docente":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: solo admin y docente pueden gestionar disponibilidades.",
-        )
-    if linked_docente_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Tu cuenta docente no está vinculada a un registro por email. Contacta con un administrador.",
-        )
-    if requested_docente_id != linked_docente_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo puedes gestionar tu propia disponibilidad docente.",
-        )
-
-
-def require_docente_access():
-    """Dependencia de autorización para disponibilidad docente propia o admin."""
-    def _check_docente_access(
-        docente_id: int,
-        usuario: dict[str, Any] = Depends(get_current_user),
-        conn: psycopg.Connection = Depends(get_db),
-    ) -> None:
-        role = _extract_role(usuario, conn)
-        linked_id = (
-            _extract_docente_id_from_email(conn, usuario.get("email"))
-            if role == "docente"
-            else None
-        )
-        ensure_docente_access(role, docente_id, linked_id)
-
-    return _check_docente_access
 
 
 def get_current_user_role(
@@ -292,7 +226,7 @@ def require_roles(allowed_roles: list[str]):
     """Dependencia de fábrica que valida el token y exige uno de los roles permitidos.
 
     Uso:
-        @router.post("/generar", dependencies=[Depends(require_roles(["admin"]))])
+        @router.post("/generar", dependencies=[Depends(require_roles(["admin", "docente"]))])
         def generar(...):
 
     Lanza 403 si el usuario autenticado no tiene ninguno de los roles permitidos.

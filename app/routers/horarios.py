@@ -31,7 +31,6 @@ router = APIRouter(
 )
 
 # Roles permitidos por operación
-ADMIN_ONLY = ["admin"]
 READ_ROLES = ["admin", "docente"]
 GENERATION_ROLES = ["admin", "docente"]
 
@@ -204,6 +203,9 @@ def generar(
     nombre = str(payload.get("nombre", "Horario"))
     horario_id = payload.get("horario_id")
 
+    if horario_id is not None:
+        _load_horario(conn, horario_id, usuario_id, role)
+
     problem, error = load_problem(conn, horario_id)
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
@@ -245,7 +247,6 @@ def generar(
                 # Regeneración: conservamos el id, limpiamos celdas y volvemos
                 # a estado "borrador" (el trigger de completitud se dispara al
                 # transitar a "completo", DESPUÉS de reinsertar las celdas).
-                _load_horario(conn, horario_id, usuario_id, role)
                 with conn.cursor() as cur:
                     cur.execute(
                         "DELETE FROM celdas WHERE horario_id = %s",
@@ -297,7 +298,7 @@ def generar(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/vacio", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.post("/vacio", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(READ_ROLES))])
 def crear_vacio(
     payload: dict,
     conn: psycopg.Connection = Depends(get_db),
@@ -423,7 +424,7 @@ _PARAMETROS_MOVIMIENTO = (
 )
 
 
-@router.post("/{horario_id}/editar", dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.post("/{horario_id}/editar", dependencies=[Depends(require_roles(READ_ROLES))])
 def editar_celda(
     horario_id: int,
     payload: dict,
@@ -444,8 +445,8 @@ def editar_celda(
     choque/disponibilidad/salón/jornada se responde 409 sin guardar nada.
     """
     usuario_id = usuario["sub"]
-    # Verificar ownership del horario antes de cualquier operación.
-    _load_horario(conn, horario_id, usuario_id, "admin")
+    role = _extract_role(usuario, conn)
+    _load_horario(conn, horario_id, usuario_id, role)
 
     celda_id = payload.get("celda_id")
     curso_id = payload.get("curso_id")
@@ -584,7 +585,7 @@ def editar_celda(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/{horario_id}/cursos/{curso_id}/celdas", dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.delete("/{horario_id}/cursos/{curso_id}/celdas", dependencies=[Depends(require_roles(READ_ROLES))])
 def vaciar_curso(
     horario_id: int,
     curso_id: int,
@@ -593,7 +594,8 @@ def vaciar_curso(
 ) -> dict:
     """Elimina únicamente las celdas de un curso dentro del horario."""
     usuario_id = usuario["sub"]
-    _load_horario(conn, horario_id, usuario_id, "admin")
+    role = _extract_role(usuario, conn)
+    _load_horario(conn, horario_id, usuario_id, role)
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
@@ -611,7 +613,7 @@ def vaciar_curso(
     }
 
 
-@router.delete("/{horario_id}/celdas/{celda_id}", dependencies=[Depends(require_roles(ADMIN_ONLY))])
+@router.delete("/{horario_id}/celdas/{celda_id}", dependencies=[Depends(require_roles(READ_ROLES))])
 def borrar_celda(
     horario_id: int,
     celda_id: int,
@@ -624,7 +626,8 @@ def borrar_celda(
     y persiste el estado del horario (`_recalcular_estado`) y lo devuelve.
     """
     usuario_id = usuario["sub"]
-    _load_horario(conn, horario_id, usuario_id, "admin")
+    role = _extract_role(usuario, conn)
+    _load_horario(conn, horario_id, usuario_id, role)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "DELETE FROM celdas WHERE id = %s AND horario_id = %s RETURNING *",

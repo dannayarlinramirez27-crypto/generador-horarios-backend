@@ -118,7 +118,7 @@ def test_generar_regeneracion_inserta_celdas_antes_del_estado_completo(
     respuesta = horarios_router.generar(
         {"nombre": _NOMBRE, "horario_id": _HORARIO_ID},
         conn,
-        {"sub": "test-user-uuid"},
+        {"sub": "test-user-uuid", "app_metadata": {"role": "docente"}},
     )
 
     operaciones = list(zip(conn.sqls, conn.params))
