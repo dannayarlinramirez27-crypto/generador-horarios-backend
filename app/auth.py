@@ -17,7 +17,6 @@ RBAC (Role-Based Access Control):
 - Roles del sistema:
   - "admin": Acceso total.
   - "docente": Gestiona materias, su disponibilidad y genera horarios.
-  - "estudiante": Solo lectura y validación de horarios.
 """
 
 from __future__ import annotations
@@ -34,7 +33,8 @@ from psycopg.rows import dict_row
 from app.config import get_settings
 from app.db import get_db
 
-ROLES_VALIDOS = {"admin", "docente", "estudiante"}
+ROLES_VALIDOS = {"admin", "docente"}
+ROL_DESCONOCIDO = "desconocido"
 
 # ---------------------------------------------------------------------------
 # Cache de JWKS (Json Web Key Set) de Supabase
@@ -124,20 +124,26 @@ def get_current_user(
 
 
 def _extract_role_from_claims(claims: dict[str, Any]) -> str:
-    """Extrae el rol de los claims gestionados por el servidor.
+    """Extrae un rol válido de los claims de Supabase.
 
     NUNCA lee el claim `role` de nivel superior porque Supabase siempre
     lo envía como "authenticated" (rol interno de Auth, no nuestro RBAC).
 
-    `user_metadata` puede ser editado por el propio usuario y nunca concede
-    permisos. `app_metadata` solo puede ser escrito por código de confianza.
+    `app_metadata` solo puede ser escrito por código de confianza. El flujo
+    existente de registro sí permite solicitar el rol docente mediante
+    `user_metadata`; ese dato nunca puede conceder el rol admin.
     """
     app_meta = claims.get("app_metadata", {})
     role = app_meta.get("role") if isinstance(app_meta, dict) else None
     if isinstance(role, str) and role in ROLES_VALIDOS:
         return str(role)
 
-    return "estudiante"
+    user_meta = claims.get("user_metadata", {})
+    signup_role = user_meta.get("role") if isinstance(user_meta, dict) else None
+    if signup_role == "docente":
+        return "docente"
+
+    return ROL_DESCONOCIDO
 
 
 def _extract_role_from_db(conn: psycopg.Connection, user_id: str) -> str | None:
@@ -148,7 +154,7 @@ def _extract_role_from_db(conn: psycopg.Connection, user_id: str) -> str | None:
         user_id: UUID del usuario (claim `sub` del JWT).
 
     Returns:
-        El rol ('admin', 'docente', 'estudiante') o None si no hay perfil.
+        El rol ('admin' o 'docente') o None si no hay perfil válido.
     """
     try:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -158,7 +164,9 @@ def _extract_role_from_db(conn: psycopg.Connection, user_id: str) -> str | None:
             )
             row = cur.fetchone()
         if row:
-            return str(row["rol"])
+            role = row.get("rol")
+            if isinstance(role, str) and role in ROLES_VALIDOS:
+                return role
     except Exception:
         pass
     return None
@@ -172,8 +180,9 @@ def _extract_role(
 
     1. Tabla `public.perfiles` (base de datos, fuente de verdad).
     2. `app_metadata` del JWT (claims gestionados por el servidor).
-    3. Fallback por email: dannayarlinramirez0827@gmail.com → admin.
-    4. Default: "estudiante" (rol menos privilegiado).
+    3. `user_metadata.role == "docente"` (compatibilidad con el registro actual).
+    4. Fallback admin de email, conservado para la cuenta de confianza existente.
+    5. Rol interno no autorizado cuando no hay una asignación válida.
     """
     user_id = claims.get("sub")
     if conn and user_id:
@@ -182,14 +191,14 @@ def _extract_role(
             return db_role
 
     claim_role = _extract_role_from_claims(claims)
-    if claim_role != "estudiante":
+    if claim_role != ROL_DESCONOCIDO:
         return claim_role
 
     email = claims.get("email", "")
     if email in ("dannayarlinramirez0827@gmail.com", "dannayarlinramirez27@gmail.com"):
         return "admin"
 
-    return "estudiante"
+    return ROL_DESCONOCIDO
 
 
 def _extract_docente_id_from_email(

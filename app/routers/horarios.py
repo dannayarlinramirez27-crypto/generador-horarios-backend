@@ -32,7 +32,7 @@ router = APIRouter(
 
 # Roles permitidos por operación
 ADMIN_ONLY = ["admin"]
-READ_ROLES = ["admin", "docente", "estudiante"]
+READ_ROLES = ["admin", "docente"]
 GENERATION_ROLES = ["admin", "docente"]
 
 
@@ -102,16 +102,21 @@ def _insert_celdas(
 
 
 def _load_horario(
-    conn: psycopg.Connection, horario_id: int, usuario_id: str, role: str = "estudiante"
+    conn: psycopg.Connection, horario_id: int, usuario_id: str, role: str
 ) -> dict:
-    """Return owned schedules for docentes and shared schedules for admin/students."""
+    """Return shared schedules for admins and owned schedules for docentes."""
     with conn.cursor(row_factory=dict_row) as cur:
-        if role in ("admin", "estudiante"):
+        if role == "admin":
             cur.execute("SELECT * FROM horarios WHERE id = %s", (horario_id,))
-        else:
+        elif role == "docente":
             cur.execute(
                 "SELECT * FROM horarios WHERE id = %s AND usuario_id = %s",
                 (horario_id, usuario_id),
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: se requiere el rol admin o docente.",
             )
         row = cur.fetchone()
     if row is None:
@@ -340,11 +345,11 @@ def list_horarios(
     conn: psycopg.Connection = Depends(get_db),
     usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """List shared schedules for admin/students and owned schedules for docentes."""
+    """List shared schedules for admins and owned schedules for docentes."""
     usuario_id = usuario["sub"]
     role = _extract_role(usuario, conn)
     with conn.cursor(row_factory=dict_row) as cur:
-        if role in ("admin", "estudiante"):
+        if role == "admin":
             cur.execute("SELECT * FROM horarios ORDER BY id DESC")
         else:
             cur.execute(

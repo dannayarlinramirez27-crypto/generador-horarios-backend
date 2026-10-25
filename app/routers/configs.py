@@ -47,7 +47,11 @@ def list_configs(
         return [dict(r) for r in cur.fetchall()]
 
 
-@router.get("/activa", response_model=ConfigOut | None)
+@router.get(
+    "/activa",
+    response_model=ConfigOut | None,
+    dependencies=[Depends(require_roles(["admin", "docente"]))],
+)
 def get_active_config(
     conn: psycopg.Connection = Depends(get_db),
 ) -> dict | None:

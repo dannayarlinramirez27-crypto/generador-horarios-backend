@@ -17,9 +17,10 @@ router = APIRouter(
 
 TABLE = "cursos"
 ADMIN_ONLY = ["admin"]
+READ_ROLES = ["admin", "docente"]
 
 
-@router.get("", response_model=list[CursoOut])
+@router.get("", response_model=list[CursoOut], dependencies=[Depends(require_roles(READ_ROLES))])
 def list_cursos(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:
@@ -34,7 +35,7 @@ def list_cursos(
         return []
 
 
-@router.get("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
+@router.get("/{curso_id}", response_model=CursoOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def get_curso(
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),

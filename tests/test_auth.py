@@ -95,12 +95,34 @@ class _ScheduleConnection:
 
 
 def test_user_metadata_cannot_grant_a_role():
-    assert _extract_role_from_claims({"user_metadata": {"role": "admin"}}) == "estudiante"
+    assert _extract_role_from_claims({"user_metadata": {"role": "admin"}}) == "desconocido"
 
 
-@pytest.mark.parametrize("role", ["admin", "docente", "estudiante"])
+def test_user_metadata_resolves_signup_docente_role():
+    assert _extract_role_from_claims({"user_metadata": {"role": "docente"}}) == "docente"
+
+
+def test_signup_docente_role_is_resolved_for_current_user():
+    claims = {"sub": "teacher-1", "user_metadata": {"role": "docente"}}
+    assert _extract_role(claims) == "docente"
+
+
+def test_user_metadata_admin_does_not_grant_admin_to_current_user():
+    claims = {
+        "sub": "user-1",
+        "email": "member@school.edu",
+        "user_metadata": {"role": "admin"},
+    }
+    assert _extract_role(claims) == "desconocido"
+
+
+@pytest.mark.parametrize("role", ["admin", "docente"])
 def test_server_managed_role_claim_is_recognized(role):
     assert _extract_role_from_claims({"app_metadata": {"role": role}}) == role
+
+
+def test_unknown_role_claims_fail_closed():
+    assert _extract_role_from_claims({"app_metadata": {"role": "visitor"}}) == "desconocido"
 
 
 def test_database_profile_role_precedes_app_metadata():
@@ -108,7 +130,12 @@ def test_database_profile_role_precedes_app_metadata():
     assert _extract_role(claims, _ProfileConnection({"rol": "docente"})) == "docente"
 
 
-@pytest.mark.parametrize("role", ["admin", "docente", "estudiante"])
+def test_invalid_database_profile_falls_back_to_server_managed_role():
+    claims = {"sub": "user-1", "app_metadata": {"role": "docente"}}
+    assert _extract_role(claims, _ProfileConnection({"rol": "visitor"})) == "docente"
+
+
+@pytest.mark.parametrize("role", ["admin", "docente"])
 def test_all_roles_can_read_and_validate_schedules(role):
     ensure_role_allowed(role, READ_ROLES)
 
@@ -118,7 +145,7 @@ def test_all_roles_can_read_and_validate_schedules(role):
     [
         ("admin", ["admin"], True),
         ("docente", ["admin", "docente"], True),
-        ("estudiante", ["admin", "docente"], False),
+        ("desconocido", ["admin", "docente"], False),
         ("docente", ["admin"], False),
     ],
 )
@@ -149,9 +176,9 @@ def test_unlinked_docente_is_denied_with_clear_error():
     assert "no está vinculada" in exc.value.detail
 
 
-def test_student_cannot_manage_docente_availability():
+def test_unknown_role_cannot_manage_docente_availability():
     with pytest.raises(HTTPException) as exc:
-        ensure_docente_access("estudiante", requested_docente_id=42, linked_docente_id=42)
+        ensure_docente_access("desconocido", requested_docente_id=42, linked_docente_id=42)
     assert exc.value.status_code == 403
 
 
@@ -166,10 +193,9 @@ def test_email_lookup_is_case_insensitive_and_requires_a_unique_match():
     ) is None
 
 
-@pytest.mark.parametrize("role", ["admin", "estudiante"])
-def test_admin_and_students_can_read_shared_schedules(role):
+def test_admin_can_read_shared_schedules():
     conn = _ScheduleConnection()
-    _load_horario(conn, horario_id=42, usuario_id="reader-1", role=role)
+    _load_horario(conn, horario_id=42, usuario_id="reader-1", role="admin")
     assert "usuario_id =" not in conn.cursor_instance.sql
     assert conn.cursor_instance.params == (42,)
 
@@ -179,3 +205,14 @@ def test_docente_schedule_reads_remain_scoped_to_their_own_records():
     _load_horario(conn, horario_id=42, usuario_id="teacher-1", role="docente")
     assert "usuario_id = %s" in conn.cursor_instance.sql
     assert conn.cursor_instance.params == (42, "teacher-1")
+
+
+def test_unknown_role_cannot_load_schedules():
+    with pytest.raises(HTTPException) as exc:
+        _load_horario(
+            _ScheduleConnection(),
+            horario_id=42,
+            usuario_id="user-1",
+            role="desconocido",
+        )
+    assert exc.value.status_code == 403

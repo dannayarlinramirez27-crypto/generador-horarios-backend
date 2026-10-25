@@ -20,9 +20,10 @@ router = APIRouter(
 
 TABLE = "materias"
 MANAGE_ROLES = ["admin", "docente"]
+READ_ROLES = ["admin", "docente"]
 
 
-@router.get("", response_model=list[MateriaOut])
+@router.get("", response_model=list[MateriaOut], dependencies=[Depends(require_roles(READ_ROLES))])
 def list_materias(
     conn: psycopg.Connection = Depends(get_db),
 ) -> list[dict]:

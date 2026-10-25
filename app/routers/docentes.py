@@ -26,7 +26,7 @@ router = APIRouter(
 )
 
 ADMIN_ONLY = ["admin"]
-READ_ROLES = ["admin", "docente", "estudiante"]
+READ_ROLES = ["admin", "docente"]
 
 DOC_TABLE = "docentes"
 DISP_TABLE = "disponibilidades"
@@ -72,7 +72,7 @@ def list_docentes(
         return []
 
 
-@router.get("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(["admin", "docente"]))])
+@router.get("/{docente_id}", response_model=DocenteOut, dependencies=[Depends(require_roles(ADMIN_ONLY))])
 def get_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
