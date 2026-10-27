@@ -34,16 +34,18 @@ MODULE_ROUTERS = (
 )
 
 
-class _ProfileCursor:
-    def __init__(self, row):
-        self.row = row
+class _RoleCursor:
+    def __init__(self, rows):
+        self.rows = rows
+        self.sql = None
         self.params = None
 
-    def execute(self, _sql, params):
+    def execute(self, sql, params):
+        self.sql = sql
         self.params = params
 
-    def fetchone(self):
-        return self.row
+    def fetchall(self):
+        return self.rows
 
     def __enter__(self):
         return self
@@ -52,11 +54,13 @@ class _ProfileCursor:
         return False
 
 
-class _ProfileConnection:
-    def __init__(self, row):
-        self.cursor_instance = _ProfileCursor(row)
+class _RoleConnection:
+    def __init__(self, rows):
+        self.cursor_instance = _RoleCursor(rows)
+        self.cursor_calls = 0
 
     def cursor(self, row_factory=None):
+        self.cursor_calls += 1
         return self.cursor_instance
 
 
@@ -91,15 +95,6 @@ def test_user_metadata_cannot_grant_a_role():
     assert _extract_role_from_claims({"user_metadata": {"role": "admin"}}) == "desconocido"
 
 
-def test_user_metadata_resolves_signup_docente_role():
-    assert _extract_role_from_claims({"user_metadata": {"role": "docente"}}) == "docente"
-
-
-def test_signup_docente_role_is_resolved_for_current_user():
-    claims = {"sub": "teacher-1", "user_metadata": {"role": "docente"}}
-    assert _extract_role(claims) == "docente"
-
-
 def test_user_metadata_admin_does_not_grant_admin_to_current_user():
     claims = {
         "sub": "user-1",
@@ -122,14 +117,64 @@ def test_only_admin_and_docente_are_valid_roles():
     assert ROLES_VALIDOS == {"admin", "docente"}
 
 
-def test_database_profile_role_precedes_app_metadata():
-    claims = {"sub": "user-1", "app_metadata": {"role": "admin"}}
-    assert _extract_role(claims, _ProfileConnection({"rol": "docente"})) == "docente"
+@pytest.mark.parametrize("role", ["admin", "docente"])
+def test_trusted_app_metadata_role_is_used_without_a_database_lookup(role):
+    conn = _RoleConnection([])
+    claims = {"email": "teacher@school.edu", "app_metadata": {"role": role}}
+
+    assert _extract_role(claims, conn) == role
+    assert conn.cursor_calls == 0
 
 
-def test_invalid_database_profile_falls_back_to_server_managed_role():
-    claims = {"sub": "user-1", "app_metadata": {"role": "docente"}}
-    assert _extract_role(claims, _ProfileConnection({"rol": "visitor"})) == "docente"
+def test_docente_email_match_is_case_insensitive_and_uses_real_table():
+    conn = _RoleConnection([{"email": "teacher@school.edu"}])
+    claims = {
+        "email": "Teacher@School.edu",
+        "user_metadata": {"role": "docente"},
+    }
+
+    assert _extract_role(claims, conn) == "docente"
+    assert "public.docentes" in conn.cursor_instance.sql
+    assert "lower(email) = lower(%s)" in conn.cursor_instance.sql
+    assert "perfiles" not in conn.cursor_instance.sql
+    assert conn.cursor_instance.params == ("Teacher@School.edu",)
+
+
+@pytest.mark.parametrize(
+    "matched_rows",
+    [[], [{"email": "teacher@school.edu"}, {"email": "TEACHER@SCHOOL.EDU"}]],
+)
+def test_docente_requires_exactly_one_matching_record(matched_rows):
+    claims = {"email": "teacher@school.edu"}
+
+    assert _extract_role(claims, _RoleConnection(matched_rows)) == "desconocido"
+
+
+def test_docente_metadata_without_a_matched_record_fails_closed():
+    claims = {
+        "email": "new.teacher@school.edu",
+        "user_metadata": {"role": "docente"},
+    }
+
+    assert _extract_role(claims, _RoleConnection([])) == "desconocido"
+
+
+def test_unknown_role_without_a_docente_match_fails_closed():
+    claims = {
+        "email": "visitor@school.edu",
+        "app_metadata": {"role": "visitor"},
+        "user_metadata": {"role": "visitor"},
+    }
+
+    assert _extract_role(claims, _RoleConnection([])) == "desconocido"
+
+
+def test_legacy_admin_email_fallback_is_preserved():
+    claims = {"email": "DANNAYARLINRAMIREZ0827@gmail.com"}
+    conn = _RoleConnection([])
+
+    assert _extract_role(claims, conn) == "admin"
+    assert conn.cursor_calls == 0
 
 
 @pytest.mark.parametrize("role", ["admin", "docente"])

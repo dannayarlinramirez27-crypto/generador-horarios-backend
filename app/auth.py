@@ -124,49 +124,44 @@ def get_current_user(
 
 
 def _extract_role_from_claims(claims: dict[str, Any]) -> str:
-    """Extrae un rol válido de los claims de Supabase.
+    """Extrae un rol válido de los claims de Supabase gestionados por el servidor.
 
     NUNCA lee el claim `role` de nivel superior porque Supabase siempre
     lo envía como "authenticated" (rol interno de Auth, no nuestro RBAC).
 
-    `app_metadata` solo puede ser escrito por código de confianza. El flujo
-    existente de registro sí permite solicitar el rol docente mediante
-    `user_metadata`; ese dato nunca puede conceder el rol admin.
+    `app_metadata` solo puede ser escrito por código de confianza. `user_metadata`
+    es editable por el usuario y no concede ningún rol por sí solo.
     """
     app_meta = claims.get("app_metadata", {})
     role = app_meta.get("role") if isinstance(app_meta, dict) else None
     if isinstance(role, str) and role in ROLES_VALIDOS:
-        return str(role)
-
-    user_meta = claims.get("user_metadata", {})
-    signup_role = user_meta.get("role") if isinstance(user_meta, dict) else None
-    if signup_role == "docente":
-        return "docente"
+        return role
 
     return ROL_DESCONOCIDO
 
 
-def _extract_role_from_db(conn: psycopg.Connection, user_id: str) -> str | None:
-    """Consulta el rol del usuario desde la tabla `public.perfiles`.
+def _extract_docente_from_db(conn: psycopg.Connection, email: str) -> str | None:
+    """Resuelve docente solo cuando existe un único registro con ese email.
 
     Args:
         conn: Conexión activa a PostgreSQL.
-        user_id: UUID del usuario (claim `sub` del JWT).
+        email: Email del JWT ya verificado.
 
     Returns:
-        El rol ('admin' o 'docente') o None si no hay perfil válido.
+        `docente` si hay exactamente una coincidencia; de lo contrario, None.
     """
+    if not isinstance(email, str) or not email.strip():
+        return None
+
     try:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT rol FROM public.perfiles WHERE id = %s",
-                (user_id,),
+                "SELECT email FROM public.docentes WHERE lower(email) = lower(%s)",
+                (email.strip(),),
             )
-            row = cur.fetchone()
-        if row:
-            role = row.get("rol")
-            if isinstance(role, str) and role in ROLES_VALIDOS:
-                return role
+            rows = cur.fetchall()
+        if len(rows) == 1:
+            return "docente"
     except Exception:
         pass
     return None
@@ -176,27 +171,28 @@ def _extract_role(
     claims: dict[str, Any],
     conn: psycopg.Connection | None = None,
 ) -> str:
-    """Extrae el rol del usuario. Prioridad:
+    """Resuelve un rol a partir de claims confiables y tablas existentes.
 
-    1. Tabla `public.perfiles` (base de datos, fuente de verdad).
-    2. `app_metadata` del JWT (claims gestionados por el servidor).
-    3. `user_metadata.role == "docente"` (compatibilidad con el registro actual).
-    4. Fallback admin de email, conservado para la cuenta de confianza existente.
-    5. Rol interno no autorizado cuando no hay una asignación válida.
+    Los roles válidos de `app_metadata` son claims administrados por el servidor.
+    El email de compatibilidad concede admin únicamente a las cuentas históricas
+    de confianza. Para docente se exige una coincidencia única en `docentes.email`;
+    `user_metadata.role` puede expresar intención de registro, pero no autoriza.
     """
-    user_id = claims.get("sub")
-    if conn and user_id:
-        db_role = _extract_role_from_db(conn, user_id)
-        if db_role:
-            return db_role
-
     claim_role = _extract_role_from_claims(claims)
     if claim_role != ROL_DESCONOCIDO:
         return claim_role
 
     email = claims.get("email", "")
-    if email in ("dannayarlinramirez0827@gmail.com", "dannayarlinramirez27@gmail.com"):
+    if isinstance(email, str) and email.strip().lower() in {
+        "dannayarlinramirez0827@gmail.com",
+        "dannayarlinramirez27@gmail.com",
+    }:
         return "admin"
+
+    if conn:
+        db_role = _extract_docente_from_db(conn, email)
+        if db_role:
+            return db_role
 
     return ROL_DESCONOCIDO
 
@@ -214,11 +210,7 @@ def get_current_user_role(
     usuario: dict[str, Any] = Depends(get_current_user),
     conn: psycopg.Connection = Depends(get_db),
 ) -> str:
-    """Dependencia que devuelve el rol del usuario autenticado.
-
-    Consulta primero la tabla `public.perfiles` en la base de datos;
-    si no hay registro, cae a `app_metadata` gestionado por el servidor.
-    """
+    """Dependencia que devuelve el rol resuelto para el usuario autenticado."""
     return _extract_role(usuario, conn)
 
 
