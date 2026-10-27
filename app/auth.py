@@ -140,31 +140,35 @@ def _extract_role_from_claims(claims: dict[str, Any]) -> str:
     return ROL_DESCONOCIDO
 
 
-def _extract_docente_from_db(conn: psycopg.Connection, email: str) -> str | None:
-    """Resuelve docente solo cuando existe un único registro con ese email.
-
-    Args:
-        conn: Conexión activa a PostgreSQL.
-        email: Email del JWT ya verificado.
-
-    Returns:
-        `docente` si hay exactamente una coincidencia; de lo contrario, None.
-    """
-    if not isinstance(email, str) or not email.strip():
-        return None
-
+def _extract_profile_role(
+    conn: psycopg.Connection,
+    subject: str,
+    email: str | None,
+) -> str:
+    """Load or atomically provision the profile role for a verified JWT subject."""
     try:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT email FROM public.docentes WHERE lower(email) = lower(%s)",
-                (email.strip(),),
+                """
+                INSERT INTO public.perfiles (id, email, role)
+                VALUES (%s, %s, 'docente')
+                ON CONFLICT (id) DO UPDATE
+                    SET email = EXCLUDED.email
+                RETURNING role
+                """,
+                (subject, email),
             )
-            rows = cur.fetchall()
-        if len(rows) == 1:
-            return "docente"
-    except Exception:
-        pass
-    return None
+            row = cur.fetchone()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El servicio de perfiles no está disponible temporalmente. Inténtalo de nuevo.",
+        ) from exc
+
+    if not row:
+        return ROL_DESCONOCIDO
+    role = row.get("role")
+    return role if isinstance(role, str) and role in ROLES_VALIDOS else ROL_DESCONOCIDO
 
 
 def _extract_role(
@@ -175,12 +179,16 @@ def _extract_role(
 
     Los roles válidos de `app_metadata` son claims administrados por el servidor.
     El email de compatibilidad concede admin únicamente a las cuentas históricas
-    de confianza. Para docente se exige una coincidencia única en `docentes.email`;
-    `user_metadata.role` puede expresar intención de registro, pero no autoriza.
+    de confianza. Los demás roles salen del perfil servidor asociado al `sub`;
+    `user_metadata.role` nunca concede autorización.
     """
     claim_role = _extract_role_from_claims(claims)
     if claim_role != ROL_DESCONOCIDO:
         return claim_role
+
+    app_meta = claims.get("app_metadata", {})
+    if isinstance(app_meta, dict) and "role" in app_meta:
+        return ROL_DESCONOCIDO
 
     email = claims.get("email", "")
     if isinstance(email, str) and email.strip().lower() in {
@@ -189,12 +197,12 @@ def _extract_role(
     }:
         return "admin"
 
-    if conn:
-        db_role = _extract_docente_from_db(conn, email)
-        if db_role:
-            return db_role
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject.strip() or conn is None:
+        return ROL_DESCONOCIDO
 
-    return ROL_DESCONOCIDO
+    profile_email = email.strip() if isinstance(email, str) and email.strip() else None
+    return _extract_profile_role(conn, subject.strip(), profile_email)
 
 
 def ensure_role_allowed(role: str, allowed_roles: list[str]) -> None:

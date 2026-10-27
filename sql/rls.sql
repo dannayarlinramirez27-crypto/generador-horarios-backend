@@ -28,6 +28,10 @@ ALTER TABLE docente_materia  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docente_curso    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE horarios         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE celdas           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.perfiles  ENABLE ROW LEVEL SECURITY;
+
+-- Perfil roles are server-owned; browser roles cannot read or mutate them.
+REVOKE ALL ON TABLE public.perfiles FROM PUBLIC, anon, authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 2. CATÁLOGOS GLOBALES — compartidos por todos los usuarios autenticados

@@ -6,3 +6,6 @@
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA auth TO anon, authenticated;
+
+-- perfiles is never exposed to browser roles, even after the broad CI grants.
+REVOKE ALL ON TABLE public.perfiles FROM PUBLIC, anon, authenticated;

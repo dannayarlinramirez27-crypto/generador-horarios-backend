@@ -1,5 +1,7 @@
+import psycopg
+from fastapi import HTTPException, status
 from psycopg import Connection
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from app.config import get_settings
 
@@ -24,5 +26,11 @@ def get_db() -> Connection:
     psycopg v3 NO gestiona transacciones implícitas; entonces se trabaja en
     modo `autocommit` y cada operación confirma de inmediato (caso CRUD simple).
     """
-    with pool.connection() as conn:
-        yield conn
+    try:
+        with pool.connection() as conn:
+            yield conn
+    except (psycopg.Error, PoolTimeout) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="La base de datos no está disponible temporalmente. Inténtalo de nuevo.",
+        ) from exc

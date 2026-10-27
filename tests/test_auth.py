@@ -2,6 +2,7 @@
 
 from inspect import getclosurevars
 
+import psycopg
 import pytest
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
@@ -35,17 +36,20 @@ MODULE_ROUTERS = (
 
 
 class _RoleCursor:
-    def __init__(self, rows):
+    def __init__(self, rows=None, error=None):
         self.rows = rows
+        self.error = error
         self.sql = None
         self.params = None
 
     def execute(self, sql, params):
         self.sql = sql
         self.params = params
+        if self.error is not None:
+            raise self.error
 
-    def fetchall(self):
-        return self.rows
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
     def __enter__(self):
         return self
@@ -55,8 +59,8 @@ class _RoleCursor:
 
 
 class _RoleConnection:
-    def __init__(self, rows):
-        self.cursor_instance = _RoleCursor(rows)
+    def __init__(self, rows=None, error=None):
+        self.cursor_instance = _RoleCursor(rows, error)
         self.cursor_calls = 0
 
     def cursor(self, row_factory=None):
@@ -101,7 +105,7 @@ def test_user_metadata_admin_does_not_grant_admin_to_current_user():
         "email": "member@school.edu",
         "user_metadata": {"role": "admin"},
     }
-    assert _extract_role(claims) == "desconocido"
+    assert _extract_role(claims, _RoleConnection([{"role": "docente"}])) == "docente"
 
 
 @pytest.mark.parametrize("role", ["admin", "docente"])
@@ -110,7 +114,11 @@ def test_server_managed_role_claim_is_recognized(role):
 
 
 def test_unknown_role_claims_fail_closed():
-    assert _extract_role_from_claims({"app_metadata": {"role": "visitor"}}) == "desconocido"
+    claims = {"sub": "user-1", "app_metadata": {"role": "visitor"}}
+    assert _extract_role_from_claims(claims) == "desconocido"
+    conn = _RoleConnection([{"role": "admin"}])
+    assert _extract_role(claims, conn) == "desconocido"
+    assert conn.cursor_calls == 0
 
 
 def test_only_admin_and_docente_are_valid_roles():
@@ -126,47 +134,47 @@ def test_trusted_app_metadata_role_is_used_without_a_database_lookup(role):
     assert conn.cursor_calls == 0
 
 
-def test_docente_email_match_is_case_insensitive_and_uses_real_table():
-    conn = _RoleConnection([{"email": "teacher@school.edu"}])
+def test_missing_profile_is_atomically_provisioned_as_docente():
+    conn = _RoleConnection([{"role": "docente"}])
     claims = {
+        "sub": "user-1",
         "email": "Teacher@School.edu",
         "user_metadata": {"role": "docente"},
     }
 
     assert _extract_role(claims, conn) == "docente"
-    assert "public.docentes" in conn.cursor_instance.sql
-    assert "lower(email) = lower(%s)" in conn.cursor_instance.sql
-    assert "perfiles" not in conn.cursor_instance.sql
-    assert conn.cursor_instance.params == ("Teacher@School.edu",)
+    assert "INSERT INTO public.perfiles" in conn.cursor_instance.sql
+    assert "VALUES (%s, %s, 'docente')" in conn.cursor_instance.sql
+    assert "ON CONFLICT (id) DO UPDATE" in conn.cursor_instance.sql
+    assert "RETURNING role" in conn.cursor_instance.sql
+    assert "SET role" not in conn.cursor_instance.sql
+    assert conn.cursor_instance.params == ("user-1", "Teacher@School.edu")
 
 
-@pytest.mark.parametrize(
-    "matched_rows",
-    [[], [{"email": "teacher@school.edu"}, {"email": "TEACHER@SCHOOL.EDU"}]],
-)
-def test_docente_requires_exactly_one_matching_record(matched_rows):
-    claims = {"email": "teacher@school.edu"}
+@pytest.mark.parametrize("role", ["admin", "docente"])
+def test_existing_profile_role_is_preserved(role):
+    conn = _RoleConnection([{"role": role}])
+    claims = {"sub": "user-1", "email": "teacher@school.edu"}
 
-    assert _extract_role(claims, _RoleConnection(matched_rows)) == "desconocido"
-
-
-def test_docente_metadata_without_a_matched_record_fails_closed():
-    claims = {
-        "email": "new.teacher@school.edu",
-        "user_metadata": {"role": "docente"},
-    }
-
-    assert _extract_role(claims, _RoleConnection([])) == "desconocido"
+    assert _extract_role(claims, conn) == role
+    assert "ON CONFLICT (id) DO UPDATE" in conn.cursor_instance.sql
+    assert "SET email = EXCLUDED.email" in conn.cursor_instance.sql
+    assert "SET role =" not in conn.cursor_instance.sql
 
 
-def test_unknown_role_without_a_docente_match_fails_closed():
-    claims = {
-        "email": "visitor@school.edu",
-        "app_metadata": {"role": "visitor"},
-        "user_metadata": {"role": "visitor"},
-    }
+def test_invalid_profile_role_fails_closed():
+    claims = {"sub": "user-1", "email": "visitor@school.edu"}
+    assert _extract_role(claims, _RoleConnection([{"role": "visitor"}])) == "desconocido"
 
-    assert _extract_role(claims, _RoleConnection([])) == "desconocido"
+
+def test_database_failure_returns_service_unavailable_instead_of_default_role():
+    claims = {"sub": "user-1", "email": "teacher@school.edu"}
+    conn = _RoleConnection(error=psycopg.OperationalError("connection unavailable"))
+
+    with pytest.raises(HTTPException) as exc:
+        _extract_role(claims, conn)
+
+    assert exc.value.status_code == 503
 
 
 def test_legacy_admin_email_fallback_is_preserved():
