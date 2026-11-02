@@ -1,7 +1,7 @@
 # CI — Tests automáticos en cada push/PR a master.
 #
-# Job 1 (unit-tests): tests del motor CSP (solver, intensidad, validación,
-#   regeneración). No necesitan base de datos — usan fixtures sintéticas.
+# Job 1 (unit-tests): tests de auth y del motor CSP (solver, intensidad,
+#   validación, regeneración). No necesitan base de datos — usan fixtures sintéticas.
 #
 # Job 2 (integration-tests): tests de integración SQL (triggers, constraints,
 #   RLS). Usan un contenedor Postgres 17 en CI — sin necesidad de secrets
@@ -21,7 +21,7 @@ jobs:
   # Tests unitarios (sin DB) — siempre se ejecutan
   # ─────────────────────────────────────────────────────────────
   unit-tests:
-    name: Tests unitarios (motor CSP)
+    name: Tests unitarios (auth + motor CSP)
     runs-on: ubuntu-latest
 
     steps:
@@ -40,7 +40,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          PYTHONPATH=. pytest tests/test_solver.py tests/test_intensity.py tests/test_validation.py tests/test_horarios_regeneracion.py -v --tb=short
+          PYTHONPATH=. pytest tests/test_auth.py tests/test_solver.py tests/test_intensity.py tests/test_validation.py tests/test_horarios_regeneracion.py -v --tb=short
 
   # ─────────────────────────────────────────────────────────────
   # Tests de integración SQL — contenedor Postgres local en CI
