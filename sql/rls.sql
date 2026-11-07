@@ -1,145 +1,220 @@
--- ============================================================================
--- RLS (Row Level Security) — Sistema Generador de Horarios
--- Motor: PostgreSQL / Supabase
---
--- Modelo de acceso: MULTI-USUARIO con aislamiento por dueño.
---   Catálogos compartidos (configs, docentes, cursos, materias, salones,
---   disponibilidades, docente_materia, docente_curso):
---     - anon ............ SELECT (lectura pública básica).
---     - authenticated ... acceso completo (SELECT/INSERT/UPDATE/DELETE).
---   Horarios y celdas (datos privados por usuario):
---     - anon ............ sin acceso.
---     - authenticated ... solo filas cuyo usuario_id = auth.uid().
---   service_role/owner ... bypassan RLS por defecto (generador del backend).
---
--- Requiere: horarios.usuario_id uuid DEFAULT auth.uid() (ver schema.sql).
--- ============================================================================
+-- Owner isolation for direct Supabase clients. The backend uses Psycopg with its
+-- server credential and independently applies the same owner predicates.
+BEGIN;
 
--- ----------------------------------------------------------------------------
--- 1. ACTIVAR RLS EN TODAS LAS TABLAS
--- ----------------------------------------------------------------------------
-ALTER TABLE configs          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE docentes         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE cursos           ENABLE ROW LEVEL SECURITY;
-ALTER TABLE materias         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE salones          ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM public.perfiles p
+         WHERE p.id = auth.uid()
+           AND p.role = 'admin'
+    );
+$$;
+REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
+
+ALTER TABLE configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE docentes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cursos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE materias ENABLE ROW LEVEL SECURITY;
+ALTER TABLE salones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE disponibilidades ENABLE ROW LEVEL SECURITY;
-ALTER TABLE docente_materia  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE docente_curso    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE horarios         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE celdas           ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.perfiles  ENABLE ROW LEVEL SECURITY;
-
--- Perfil roles are server-owned; browser roles cannot read or mutate them.
+ALTER TABLE docente_materia ENABLE ROW LEVEL SECURITY;
+ALTER TABLE docente_curso ENABLE ROW LEVEL SECURITY;
+ALTER TABLE horarios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE celdas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.perfiles ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.perfiles FROM PUBLIC, anon, authenticated;
 
--- ----------------------------------------------------------------------------
--- 2. CATÁLOGOS GLOBALES — compartidos por todos los usuarios autenticados
--- ----------------------------------------------------------------------------
+-- Remove previous shared-catalog and schedule-only policies. Policies are
+-- permissive by default, so retaining even one old global policy would bypass
+-- the owner checks below.
+DO $$
+DECLARE target_table text;
+        policy_row record;
+BEGIN
+    FOREACH target_table IN ARRAY ARRAY[
+        'configs', 'docentes', 'cursos', 'materias', 'salones',
+        'disponibilidades', 'docente_materia', 'docente_curso', 'horarios', 'celdas'
+    ] LOOP
+        FOR policy_row IN
+            SELECT policyname FROM pg_policies
+             WHERE schemaname = 'public' AND tablename = target_table
+        LOOP
+            EXECUTE format('DROP POLICY %I ON public.%I', policy_row.policyname, target_table);
+        END LOOP;
+    END LOOP;
+    IF to_regclass('public.horarios_celdas') IS NOT NULL THEN
+        FOR policy_row IN
+            SELECT policyname FROM pg_policies
+             WHERE schemaname = 'public' AND tablename = 'horarios_celdas'
+        LOOP
+            EXECUTE format('DROP POLICY %I ON public.horarios_celdas', policy_row.policyname);
+        END LOOP;
+    END IF;
+END;
+$$;
 
--- CONFIGS
-DROP POLICY IF EXISTS configs_anon_select ON configs;
-DROP POLICY IF EXISTS configs_auth_all    ON configs;
-CREATE POLICY configs_anon_select ON configs FOR SELECT TO anon USING (true);
-CREATE POLICY configs_auth_all    ON configs FOR ALL TO authenticated USING (true) WITH CHECK (true);
+-- Standalone inserts always belong to the actor, including admin-created rows.
+-- Admins may later manage any row; ownership itself is immutable by trigger.
+DO $$
+DECLARE target_table text;
+BEGIN
+    FOREACH target_table IN ARRAY ARRAY['configs', 'docentes', 'cursos', 'materias', 'salones'] LOOP
+        EXECUTE format(
+            'CREATE POLICY %I ON public.%I FOR SELECT TO authenticated USING (user_id = auth.uid() OR public.is_admin())',
+            target_table || '_owner_select', target_table
+        );
+        EXECUTE format(
+            'CREATE POLICY %I ON public.%I FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid())',
+            target_table || '_actor_insert', target_table
+        );
+        EXECUTE format(
+            'CREATE POLICY %I ON public.%I FOR UPDATE TO authenticated USING (user_id = auth.uid() OR public.is_admin()) WITH CHECK (user_id = auth.uid() OR public.is_admin())',
+            target_table || '_owner_update', target_table
+        );
+        EXECUTE format(
+            'CREATE POLICY %I ON public.%I FOR DELETE TO authenticated USING (user_id = auth.uid() OR public.is_admin())',
+            target_table || '_owner_delete', target_table
+        );
+    END LOOP;
+END;
+$$;
 
--- DOCENTES
-DROP POLICY IF EXISTS docentes_anon_select  ON docentes;
-DROP POLICY IF EXISTS docentes_auth_all     ON docentes;
-CREATE POLICY docentes_anon_select ON docentes FOR SELECT TO anon USING (true);
-CREATE POLICY docentes_auth_all    ON docentes FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY disponibilidades_owner_admin ON disponibilidades FOR ALL TO authenticated
+    USING (user_id = auth.uid() OR public.is_admin())
+    WITH CHECK (
+        (user_id = auth.uid() AND EXISTS (
+            SELECT 1 FROM public.docentes d
+             WHERE d.id = disponibilidades.docente_id AND d.user_id = auth.uid()
+        )) OR (public.is_admin() AND EXISTS (
+            SELECT 1 FROM public.docentes d
+             WHERE d.id = disponibilidades.docente_id
+               AND d.user_id = disponibilidades.user_id
+        ))
+    );
+CREATE POLICY docente_materia_owner_admin ON docente_materia FOR ALL TO authenticated
+    USING (user_id = auth.uid() OR public.is_admin())
+    WITH CHECK (
+        (user_id = auth.uid() AND EXISTS (
+            SELECT 1 FROM public.docentes d
+             WHERE d.id = docente_materia.docente_id AND d.user_id = auth.uid()
+         ) AND EXISTS (
+             SELECT 1 FROM public.materias m
+              WHERE m.id = docente_materia.materia_id AND m.user_id = auth.uid()
+         )) OR (public.is_admin() AND EXISTS (
+             SELECT 1 FROM public.docentes d
+              WHERE d.id = docente_materia.docente_id
+                AND d.user_id = docente_materia.user_id
+         ) AND EXISTS (
+             SELECT 1 FROM public.materias m
+              WHERE m.id = docente_materia.materia_id
+                AND m.user_id = docente_materia.user_id
+         ))
+    );
+CREATE POLICY docente_curso_owner_admin ON docente_curso FOR ALL TO authenticated
+    USING (user_id = auth.uid() OR public.is_admin())
+    WITH CHECK (
+        (user_id = auth.uid() AND EXISTS (
+            SELECT 1 FROM public.docentes d
+             WHERE d.id = docente_curso.docente_id AND d.user_id = auth.uid()
+         ) AND EXISTS (
+             SELECT 1 FROM public.cursos c
+              WHERE c.id = docente_curso.curso_id AND c.user_id = auth.uid()
+         )) OR (public.is_admin() AND EXISTS (
+             SELECT 1 FROM public.docentes d
+              WHERE d.id = docente_curso.docente_id
+                AND d.user_id = docente_curso.user_id
+         ) AND EXISTS (
+             SELECT 1 FROM public.cursos c
+              WHERE c.id = docente_curso.curso_id
+                AND c.user_id = docente_curso.user_id
+         ))
+    );
 
--- CURSOS
-DROP POLICY IF EXISTS cursos_anon_select ON cursos;
-DROP POLICY IF EXISTS cursos_auth_all    ON cursos;
-CREATE POLICY cursos_anon_select ON cursos FOR SELECT TO anon USING (true);
-CREATE POLICY cursos_auth_all    ON cursos FOR ALL TO authenticated USING (true) WITH CHECK (true);
+-- Schedules are canonically owned by user_id. usuario_id remains a matching
+-- compatibility alias. Inserts always belong to the authenticated actor.
+CREATE POLICY horarios_owner_select ON horarios FOR SELECT TO authenticated
+    USING (user_id = auth.uid() OR public.is_admin());
+CREATE POLICY horarios_actor_insert ON horarios FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid() AND usuario_id = auth.uid());
+CREATE POLICY horarios_owner_update ON horarios FOR UPDATE TO authenticated
+    USING (user_id = auth.uid() OR public.is_admin())
+    WITH CHECK ((user_id = auth.uid() AND usuario_id = auth.uid()) OR public.is_admin());
+CREATE POLICY horarios_owner_delete ON horarios FOR DELETE TO authenticated
+    USING (user_id = auth.uid() OR public.is_admin());
 
--- MATERIAS
-DROP POLICY IF EXISTS materias_anon_select  ON materias;
-DROP POLICY IF EXISTS materias_auth_all     ON materias;
-CREATE POLICY materias_anon_select ON materias FOR SELECT TO anon USING (true);
-CREATE POLICY materias_auth_all    ON materias FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY celdas_owner_admin ON celdas FOR ALL TO authenticated
+    USING (
+        (user_id = auth.uid() AND EXISTS (
+            SELECT 1 FROM public.horarios h
+             WHERE h.id = celdas.horario_id AND h.user_id = auth.uid()
+        )) OR public.is_admin()
+    )
+    WITH CHECK (
+        (user_id = auth.uid() AND EXISTS (
+            SELECT 1 FROM public.horarios h
+             WHERE h.id = celdas.horario_id AND h.user_id = auth.uid()
+        ) AND EXISTS (
+            SELECT 1 FROM public.cursos cu
+             WHERE cu.id = celdas.curso_id AND cu.user_id = auth.uid()
+        ) AND EXISTS (
+            SELECT 1 FROM public.materias m
+             WHERE m.id = celdas.materia_id AND m.user_id = auth.uid()
+        ) AND EXISTS (
+            SELECT 1 FROM public.docentes d
+             WHERE d.id = celdas.docente_id AND d.user_id = auth.uid()
+        ) AND EXISTS (
+            SELECT 1 FROM public.salones s
+             WHERE s.id = celdas.salon_id AND s.user_id = auth.uid()
+        )) OR (public.is_admin() AND EXISTS (
+            SELECT 1 FROM public.horarios h
+             WHERE h.id = celdas.horario_id AND h.user_id = celdas.user_id
+        ) AND EXISTS (
+            SELECT 1 FROM public.cursos cu
+             WHERE cu.id = celdas.curso_id AND cu.user_id = celdas.user_id
+        ) AND EXISTS (
+            SELECT 1 FROM public.materias m
+             WHERE m.id = celdas.materia_id AND m.user_id = celdas.user_id
+        ) AND EXISTS (
+            SELECT 1 FROM public.docentes d
+             WHERE d.id = celdas.docente_id AND d.user_id = celdas.user_id
+        ) AND EXISTS (
+            SELECT 1 FROM public.salones s
+             WHERE s.id = celdas.salon_id AND s.user_id = celdas.user_id
+        ))
+    );
 
--- SALONES
-DROP POLICY IF EXISTS salones_anon_select  ON salones;
-DROP POLICY IF EXISTS salones_auth_all     ON salones;
-CREATE POLICY salones_anon_select ON salones FOR SELECT TO anon USING (true);
-CREATE POLICY salones_auth_all    ON salones FOR ALL TO authenticated USING (true) WITH CHECK (true);
+-- Existing deployments may retain the historical table name. It is private
+-- and its rows inherit ownership from horarios, like celdas.
+DO $$
+BEGIN
+    IF to_regclass('public.horarios_celdas') IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE public.horarios_celdas ENABLE ROW LEVEL SECURITY';
+        EXECUTE 'DROP POLICY IF EXISTS horarios_celdas_owner_admin ON public.horarios_celdas';
+        EXECUTE $policy$
+            CREATE POLICY horarios_celdas_owner_admin ON public.horarios_celdas
+            FOR ALL TO authenticated
+            USING ((user_id = auth.uid() AND EXISTS (
+                SELECT 1 FROM public.horarios h
+                 WHERE h.id = horarios_celdas.horario_id AND h.user_id = auth.uid()
+            )) OR public.is_admin())
+            WITH CHECK ((user_id = auth.uid() AND EXISTS (
+                SELECT 1 FROM public.horarios h
+                 WHERE h.id = horarios_celdas.horario_id AND h.user_id = auth.uid()
+            )) OR (public.is_admin() AND EXISTS (
+                SELECT 1 FROM public.horarios h
+                 WHERE h.id = horarios_celdas.horario_id AND h.user_id = horarios_celdas.user_id
+            )))
+        $policy$;
+    END IF;
+END;
+$$;
 
--- DISPONIBILIDADES
-DROP POLICY IF EXISTS disponibilidades_anon_select  ON disponibilidades;
-DROP POLICY IF EXISTS disponibilidades_auth_all     ON disponibilidades;
-CREATE POLICY disponibilidades_anon_select ON disponibilidades FOR SELECT TO anon USING (true);
-CREATE POLICY disponibilidades_auth_all    ON disponibilidades FOR ALL TO authenticated USING (true) WITH CHECK (true);
-
--- DOCENTE_MATERIA
-DROP POLICY IF EXISTS docente_materia_anon_select  ON docente_materia;
-DROP POLICY IF EXISTS docente_materia_auth_all     ON docente_materia;
-CREATE POLICY docente_materia_anon_select ON docente_materia FOR SELECT TO anon USING (true);
-CREATE POLICY docente_materia_auth_all    ON docente_materia FOR ALL TO authenticated USING (true) WITH CHECK (true);
-
--- DOCENTE_CURSO
-DROP POLICY IF EXISTS docente_curso_anon_select  ON docente_curso;
-DROP POLICY IF EXISTS docente_curso_auth_all     ON docente_curso;
-CREATE POLICY docente_curso_anon_select ON docente_curso FOR SELECT TO anon USING (true);
-CREATE POLICY docente_curso_auth_all    ON docente_curso FOR ALL TO authenticated USING (true) WITH CHECK (true);
-
--- ----------------------------------------------------------------------------
--- 3. HORARIOS — visibilidad/escritura limitada al dueño (usuario_id)
--- ----------------------------------------------------------------------------
-DROP POLICY IF EXISTS horarios_auth_select ON horarios;
-DROP POLICY IF EXISTS horarios_auth_insert ON horarios;
-DROP POLICY IF EXISTS horarios_auth_update ON horarios;
-DROP POLICY IF EXISTS horarios_auth_delete ON horarios;
-
-CREATE POLICY horarios_auth_select ON horarios
-    FOR SELECT TO authenticated USING (usuario_id = auth.uid());
-
--- auth.uid() se asigna por defecto (columna DEFAULT), por eso el INSERT solo valida.
-CREATE POLICY horarios_auth_insert ON horarios
-    FOR INSERT TO authenticated
-    WITH CHECK (usuario_id = auth.uid());
-
-CREATE POLICY horarios_auth_update ON horarios
-    FOR UPDATE TO authenticated
-    USING (usuario_id = auth.uid())
-    WITH CHECK (usuario_id = auth.uid());
-
-CREATE POLICY horarios_auth_delete ON horarios
-    FOR DELETE TO authenticated USING (usuario_id = auth.uid());
-
--- ----------------------------------------------------------------------------
--- 4. CELDAS — heredan la propiedad del horario al que pertenecen
--- ----------------------------------------------------------------------------
-DROP POLICY IF EXISTS celdas_auth_select ON celdas;
-DROP POLICY IF EXISTS celdas_auth_insert ON celdas;
-DROP POLICY IF EXISTS celdas_auth_update ON celdas;
-DROP POLICY IF EXISTS celdas_auth_delete ON celdas;
-
-CREATE POLICY celdas_auth_select ON celdas
-    FOR SELECT TO authenticated
-    USING (EXISTS (SELECT 1 FROM horarios h
-                    WHERE h.id = celdas.horario_id
-                      AND h.usuario_id = auth.uid()));
-
-CREATE POLICY celdas_auth_insert ON celdas
-    FOR INSERT TO authenticated
-    WITH CHECK (EXISTS (SELECT 1 FROM horarios h
-                        WHERE h.id = celdas.horario_id
-                          AND h.usuario_id = auth.uid()));
-
-CREATE POLICY celdas_auth_update ON celdas
-    FOR UPDATE TO authenticated
-    USING (EXISTS (SELECT 1 FROM horarios h
-                    WHERE h.id = celdas.horario_id
-                      AND h.usuario_id = auth.uid()))
-    WITH CHECK (EXISTS (SELECT 1 FROM horarios h
-                        WHERE h.id = celdas.horario_id
-                          AND h.usuario_id = auth.uid()));
-
-CREATE POLICY celdas_auth_delete ON celdas
-    FOR DELETE TO authenticated
-    USING (EXISTS (SELECT 1 FROM horarios h
-                    WHERE h.id = celdas.horario_id
-                      AND h.usuario_id = auth.uid()));
+COMMIT;

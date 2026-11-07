@@ -17,6 +17,7 @@ from app.models.disponibilidades import (
     DisponibilidadCreate,
     DisponibilidadOut,
 )
+from app.ownership import fetch_owned_record, owner_scope, request_role
 from app.routers._common import build_update_statement, raise_db_error
 
 router = APIRouter(
@@ -31,17 +32,9 @@ DOC_TABLE = "docentes"
 DISP_TABLE = "disponibilidades"
 
 
-def _get_docente(conn, docente_id: int) -> dict:
+def _get_docente(conn, docente_id: int, role: str, user_id: str) -> dict:
     """Devuelve el docente o eleva 404."""
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(f"SELECT * FROM {DOC_TABLE} WHERE id = %s", (docente_id,))
-        row = cur.fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Docente {docente_id} no encontrado.",
-        )
-    return dict(row)
+    return fetch_owned_record(conn, DOC_TABLE, docente_id, role, user_id, "Docente")
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +46,17 @@ def _get_docente(conn, docente_id: int) -> dict:
 def list_docentes(
     activo: bool | None = None,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista docentes; opcionalmente filtra por `activo`.
     Si la tabla está vacía o hay error de BD, retorna [] con 200."""
     try:
+        predicate, owner_params = owner_scope(request_role(usuario, conn), usuario["sub"])
         query = f"SELECT * FROM {DOC_TABLE}"
-        params: list = []
+        query += f" WHERE {predicate}"
+        params: list = list(owner_params)
         if activo is not None:
-            query += " WHERE activo = %s"
+            query += " AND activo = %s"
             params.append(activo)
         query += " ORDER BY apellido, nombre"
         with conn.cursor(row_factory=dict_row) as cur:
@@ -75,15 +71,17 @@ def list_docentes(
 def get_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Devuelve un docente por su id."""
-    return _get_docente(conn, docente_id)
+    return _get_docente(conn, docente_id, request_role(usuario, conn), usuario["sub"])
 
 
 @router.post("", response_model=DocenteOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def create_docente(
     payload: DocenteCreate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Registra un docente (documento y email únicos)."""
     try:
@@ -92,8 +90,8 @@ def create_docente(
                 f"""
                 INSERT INTO {DOC_TABLE}
                     (nombre, apellido, documento, telefono, email,
-                     carga_horaria, activo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                     carga_horaria, activo, user_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -104,6 +102,7 @@ def create_docente(
                     payload.email,
                     payload.carga_horaria,
                     payload.activo,
+                    usuario["sub"],
                 ),
             )
             row = cur.fetchone()
@@ -117,10 +116,11 @@ def update_docente(
     docente_id: int,
     payload: DocenteUpdate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Actualiza parcialmente un docente."""
     updates = payload.model_dump(exclude_unset=True)
-    _get_docente(conn, docente_id)
+    _get_docente(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     try:
         sql, params = build_update_statement(DOC_TABLE, "id", docente_id, updates)
         with conn.cursor(row_factory=dict_row) as cur:
@@ -135,9 +135,10 @@ def update_docente(
 def delete_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> None:
     """Elimina físicamente un docente (cascada sobre disponibilidades y asignaciones)."""
-    _get_docente(conn, docente_id)
+    _get_docente(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     try:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {DOC_TABLE} WHERE id = %s", (docente_id,))
@@ -154,13 +155,14 @@ def delete_docente(
 def list_disponibilidades(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista las ventanas horarias de un docente (404 si el docente no existe)."""
-    _get_docente(conn, docente_id)
+    docente = _get_docente(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"SELECT * FROM {DISP_TABLE} WHERE docente_id = %s ORDER BY dia, hora_inicio",
-            (docente_id,),
+            f"SELECT * FROM {DISP_TABLE} WHERE docente_id = %s AND user_id = %s ORDER BY dia, hora_inicio",
+            (docente_id, docente["user_id"]),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -175,18 +177,19 @@ def create_disponibilidad(
     docente_id: int,
     payload: DisponibilidadCreate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Agrega una ventana horaria al docente (Unique docente, día, hora inicio/fin)."""
-    _get_docente(conn, docente_id)
+    docente = _get_docente(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     try:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"""
-                INSERT INTO {DISP_TABLE} (docente_id, dia, hora_inicio, hora_fin)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO {DISP_TABLE} (docente_id, dia, hora_inicio, hora_fin, user_id)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING *
                 """,
-                (docente_id, payload.dia, payload.hora_inicio, payload.hora_fin),
+                (docente_id, payload.dia, payload.hora_inicio, payload.hora_fin, docente["user_id"]),
             )
             row = cur.fetchone()
         return dict(row)
@@ -203,17 +206,21 @@ def delete_disponibilidad(
     docente_id: int,
     disp_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> None:
     """Elimina una ventana horaria del docente."""
-    _get_docente(conn, docente_id)
+    docente = _get_docente(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM disponibilidades WHERE id = %s AND docente_id = %s",
-            (disp_id, docente_id),
+            "SELECT 1 FROM disponibilidades WHERE id = %s AND docente_id = %s AND user_id = %s",
+            (disp_id, docente_id, docente["user_id"]),
         )
         if cur.fetchone() is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Disponibilidad {disp_id} no encontrada.",
             )
-        cur.execute("DELETE FROM disponibilidades WHERE id = %s", (disp_id,))
+        cur.execute(
+            "DELETE FROM disponibilidades WHERE id = %s AND docente_id = %s AND user_id = %s",
+            (disp_id, docente_id, docente["user_id"]),
+        )

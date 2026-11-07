@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict
+from uuid import UUID
 
 
 class DocenteMateriaCreate(BaseModel):
@@ -12,6 +13,7 @@ class DocenteMateriaOut(DocenteMateriaCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: UUID
 
 
 class DocenteCursoCreate(BaseModel):
@@ -25,3 +27,4 @@ class DocenteCursoOut(DocenteCursoCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: UUID

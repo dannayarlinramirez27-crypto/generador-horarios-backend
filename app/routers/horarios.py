@@ -18,10 +18,11 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg.rows import dict_row
 
-from app.auth import _extract_role, get_current_user, require_roles
+from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.celdas import CeldaOut
 from app.models.horarios import HorarioOut
+from app.ownership import owner_scope, request_role, require_same_owner_references
 from app.scheduler import load_problem, solve, validate_cell_move, validate_schedule
 
 router = APIRouter(
@@ -45,35 +46,36 @@ def _insert_horario(
     configuracion_id: int,
     nombre: str,
     estado: str,
-    usuario_id: str,
+    user_id: str,
 ) -> dict:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            INSERT INTO horarios (configuracion_id, nombre, estado, usuario_id)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING *
             """,
-            (configuracion_id, nombre, estado, usuario_id),
+            (configuracion_id, nombre, estado, user_id, user_id),
         )
         row = cur.fetchone()
     return dict(row)
 
 
 def _insert_celdas(
-    conn: psycopg.Connection, horario_id: int, celdas: list[dict]
+    conn: psycopg.Connection, horario_id: int, user_id: str, celdas: list[dict]
 ) -> list[dict]:
     """Inserta las celdas generadas y devuelve las filas completas."""
     if not celdas:
         return []
 
-    placeholder_group = "(" + ", ".join(["%s"] * 10) + ")"
+    placeholder_group = "(" + ", ".join(["%s"] * 11) + ")"
     values_sql = ", ".join([placeholder_group] * len(celdas))
     params = tuple(
         valor
         for celda in celdas
         for valor in (
             horario_id,
+            user_id,
             celda["curso_id"],
             celda["materia_id"],
             celda["docente_id"],
@@ -90,7 +92,7 @@ def _insert_celdas(
         cur.execute(
             f"""
             INSERT INTO celdas
-                (horario_id, curso_id, materia_id, docente_id, salon_id,
+                (horario_id, user_id, curso_id, materia_id, docente_id, salon_id,
                  dia, bloque, hora_inicio, hora_fin, bloqueada)
             VALUES {values_sql}
             RETURNING *
@@ -109,7 +111,7 @@ def _load_horario(
             cur.execute("SELECT * FROM horarios WHERE id = %s", (horario_id,))
         elif role == "docente":
             cur.execute(
-                "SELECT * FROM horarios WHERE id = %s AND usuario_id = %s",
+                "SELECT * FROM horarios WHERE id = %s AND user_id = %s",
                 (horario_id, usuario_id),
             )
         else:
@@ -126,11 +128,13 @@ def _load_horario(
     return dict(row)
 
 
-def _load_celdas_de(conn: psycopg.Connection, horario_id: int) -> list[dict]:
+def _load_celdas_de(
+    conn: psycopg.Connection, horario_id: int, user_id: str
+) -> list[dict]:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT * FROM celdas WHERE horario_id = %s ORDER BY dia, bloque, id",
-            (horario_id,),
+            "SELECT * FROM celdas WHERE horario_id = %s AND user_id = %s ORDER BY dia, bloque, id",
+            (horario_id, user_id),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -147,7 +151,9 @@ def _parse_hora(valor: time | str | None) -> time | None:
     return valor
 
 
-def _recalcular_estado(conn: psycopg.Connection, horario_id: int) -> str:
+def _recalcular_estado(
+    conn: psycopg.Connection, horario_id: int, user_id: str, role: str
+) -> str:
     """Recalcula y persiste el estado del horario según sus celdas actuales.
 
     Reglas (espejo de la semántica del solver):
@@ -160,11 +166,11 @@ def _recalcular_estado(conn: psycopg.Connection, horario_id: int) -> str:
     estado prudente por conteo (`borrador` sin celdas, `parcial` con celdas)
     en lugar de fallar la operación de edición que la invocó.
     """
-    celdas = _load_celdas_de(conn, horario_id)
+    celdas = _load_celdas_de(conn, horario_id, user_id)
     if not celdas:
         estado = "borrador"
     else:
-        problem, error = load_problem(conn, horario_id)
+        problem, error = load_problem(conn, horario_id, owner_id=user_id, admin=role == "admin")
         if error:
             estado = "parcial"
         else:
@@ -199,14 +205,17 @@ def generar(
         configuración; en caso contrario usa la configuración activa.
     """
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
+    role = request_role(usuario, conn)
     nombre = str(payload.get("nombre", "Horario"))
     horario_id = payload.get("horario_id")
 
     if horario_id is not None:
-        _load_horario(conn, horario_id, usuario_id, role)
+        horario_existente = _load_horario(conn, horario_id, usuario_id, role)
+        owner_id = str(horario_existente["user_id"])
+    else:
+        owner_id = usuario_id
 
-    problem, error = load_problem(conn, horario_id)
+    problem, error = load_problem(conn, horario_id, owner_id=owner_id, admin=role == "admin")
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
 
@@ -258,12 +267,12 @@ def generar(
                     )
             else:
                 config_id = problem.jornada.config_id
-                horario = _insert_horario(conn, config_id, nombre, "borrador", usuario_id)
+                horario = _insert_horario(conn, config_id, nombre, "borrador", owner_id)
                 horario_id = horario["id"]
 
             # Primero las celdas, luego el estado: el trigger sch_horario_validar
             # valida completitud/intensidad/carga con las celdas ya presentes.
-            celdas = _insert_celdas(conn, horario_id, resultado.celdas) if resultado.celdas else []
+            celdas = _insert_celdas(conn, horario_id, owner_id, resultado.celdas) if resultado.celdas else []
 
             with conn.cursor() as cur:
                 cur.execute(
@@ -311,9 +320,10 @@ def crear_vacio(
     `generar`). Devuelve la misma forma que `generar` con celdas vacías.
     """
     usuario_id = usuario["sub"]
+    role = request_role(usuario, conn)
     nombre = str(payload.get("nombre", "Horario en blanco"))
 
-    problem, error = load_problem(conn, None)
+    problem, error = load_problem(conn, None, owner_id=usuario_id, admin=role == "admin")
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
 
@@ -348,15 +358,10 @@ def list_horarios(
 ) -> list[dict]:
     """List shared schedules for admins and owned schedules for docentes."""
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
+    role = request_role(usuario, conn)
     with conn.cursor(row_factory=dict_row) as cur:
-        if role == "admin":
-            cur.execute("SELECT * FROM horarios ORDER BY id DESC")
-        else:
-            cur.execute(
-                "SELECT * FROM horarios WHERE usuario_id = %s ORDER BY id DESC",
-                (usuario_id,),
-            )
+        predicate, params = owner_scope(role, usuario_id)
+        cur.execute(f"SELECT * FROM horarios WHERE {predicate} ORDER BY id DESC", params)
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -368,9 +373,9 @@ def get_horario(
 ) -> dict:
     """Devuelve un horario con todas sus celdas (solo si es del usuario)."""
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
+    role = request_role(usuario, conn)
     horario = _load_horario(conn, horario_id, usuario_id, role)
-    celdas = _load_celdas_de(conn, horario_id)
+    celdas = _load_celdas_de(conn, horario_id, str(horario["user_id"]))
     return {"horario": horario, "celdas": celdas}
 
 
@@ -391,12 +396,13 @@ def validar_horario(
     mensaje). Si la lista está vacía → horario válido.
     """
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
+    role = request_role(usuario, conn)
     horario_id = payload.get("horario_id")
-    _load_horario(conn, horario_id, usuario_id, role)
-    celdas = _load_celdas_de(conn, horario_id)
+    horario = _load_horario(conn, horario_id, usuario_id, role)
+    owner_id = str(horario["user_id"])
+    celdas = _load_celdas_de(conn, horario_id, owner_id)
 
-    problem, error = load_problem(conn, horario_id)
+    problem, error = load_problem(conn, horario_id, owner_id=owner_id, admin=role == "admin")
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
 
@@ -445,8 +451,9 @@ def editar_celda(
     choque/disponibilidad/salón/jornada se responde 409 sin guardar nada.
     """
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
-    _load_horario(conn, horario_id, usuario_id, role)
+    role = request_role(usuario, conn)
+    horario = _load_horario(conn, horario_id, usuario_id, role)
+    owner_id = str(horario["user_id"])
 
     celda_id = payload.get("celda_id")
     curso_id = payload.get("curso_id")
@@ -456,7 +463,7 @@ def editar_celda(
             detail="`curso_id` es obligatorio.",
         )
 
-    celdas_actuales = _load_celdas_de(conn, horario_id)
+    celdas_actuales = _load_celdas_de(conn, horario_id, owner_id)
 
     # Construcción de la celda propuesta (nueva o resultado del movimiento).
     if celda_id is not None:
@@ -494,8 +501,21 @@ def editar_celda(
     for k in ("hora_inicio", "hora_fin"):
         propuesta[k] = _parse_hora(propuesta.get(k))
 
+    require_same_owner_references(
+        conn,
+        {
+            "Curso": ("cursos", propuesta["curso_id"]),
+            "Materia": ("materias", propuesta["materia_id"]),
+            "Docente": ("docentes", propuesta["docente_id"]),
+            "Salón": ("salones", propuesta["salon_id"]),
+        },
+        role=role,
+        actor_id=usuario_id,
+        owner_id=owner_id,
+    )
+
     # 1) Validación en vivo (sin tocar la BD).
-    problem, error = load_problem(conn, horario_id)
+    problem, error = load_problem(conn, horario_id, owner_id=owner_id, admin=role == "admin")
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error["detail"])
 
@@ -542,13 +562,14 @@ def editar_celda(
                     cur.execute(
                         """
                         INSERT INTO celdas
-                            (horario_id, curso_id, materia_id, docente_id, salon_id,
+                            (horario_id, user_id, curso_id, materia_id, docente_id, salon_id,
                              dia, bloque, hora_inicio, hora_fin, bloqueada)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING *
                         """,
                         (
                             horario_id,
+                            owner_id,
                             curso_id,
                             propuesta["materia_id"],
                             propuesta["docente_id"],
@@ -571,7 +592,7 @@ def editar_celda(
 
     advertencias = [v for v in violaciones if v["tipo"] == "carga_curso_incompleta"]
     # 3) Estado del horario tras la mutación (se persiste en la BD).
-    estado = _recalcular_estado(conn, horario_id)
+    estado = _recalcular_estado(conn, horario_id, owner_id, role)
     return {
         "valido": True,
         "celda": dict(fila),
@@ -594,8 +615,16 @@ def vaciar_curso(
 ) -> dict:
     """Elimina únicamente las celdas de un curso dentro del horario."""
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
-    _load_horario(conn, horario_id, usuario_id, role)
+    role = request_role(usuario, conn)
+    horario = _load_horario(conn, horario_id, usuario_id, role)
+    owner_id = str(horario["user_id"])
+    require_same_owner_references(
+        conn,
+        {"Curso": ("cursos", curso_id)},
+        role=role,
+        actor_id=usuario_id,
+        owner_id=owner_id,
+    )
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
@@ -603,7 +632,7 @@ def vaciar_curso(
                 (horario_id, curso_id),
             )
             eliminadas = len(cur.fetchall())
-        estado = _recalcular_estado(conn, horario_id)
+        estado = _recalcular_estado(conn, horario_id, owner_id, role)
 
     return {
         "eliminadas": eliminadas,
@@ -626,8 +655,9 @@ def borrar_celda(
     y persiste el estado del horario (`_recalcular_estado`) y lo devuelve.
     """
     usuario_id = usuario["sub"]
-    role = _extract_role(usuario, conn)
-    _load_horario(conn, horario_id, usuario_id, role)
+    role = request_role(usuario, conn)
+    horario = _load_horario(conn, horario_id, usuario_id, role)
+    owner_id = str(horario["user_id"])
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "DELETE FROM celdas WHERE id = %s AND horario_id = %s RETURNING *",
@@ -640,7 +670,7 @@ def borrar_celda(
             detail=f"Celda {celda_id} no encontrada en el horario {horario_id}.",
         )
 
-    estado = _recalcular_estado(conn, horario_id)
+    estado = _recalcular_estado(conn, horario_id, owner_id, role)
     return {
         "eliminada": True,
         "celda_id": celda_id,

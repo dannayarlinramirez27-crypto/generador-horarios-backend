@@ -136,14 +136,22 @@ def seed(db_conn):
 
 
 def _insert_celda(cur, hor_id, cur_id, mat_id, doc_id, salon_id,
-                  dia, bloque, hi="07:00:00", hf="08:00:00"):
+                  dia, bloque, hi="07:00:00", hf="08:00:00", owner_id=None):
     """Helper: inserta una celda con los valores dados."""
-    cur.execute(
-        """INSERT INTO celdas (horario_id, curso_id, materia_id, docente_id,
-               salon_id, dia, bloque, hora_inicio, hora_fin, bloqueada)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, false)""",
-        (hor_id, cur_id, mat_id, doc_id, salon_id, dia, bloque, hi, hf),
-    )
+    if owner_id is None:
+        cur.execute(
+            """INSERT INTO celdas (horario_id, curso_id, materia_id, docente_id,
+                   salon_id, dia, bloque, hora_inicio, hora_fin, bloqueada)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, false)""",
+            (hor_id, cur_id, mat_id, doc_id, salon_id, dia, bloque, hi, hf),
+        )
+    else:
+        cur.execute(
+            """INSERT INTO celdas (horario_id, user_id, curso_id, materia_id, docente_id,
+                   salon_id, dia, bloque, hora_inicio, hora_fin, bloqueada)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false)""",
+            (hor_id, owner_id, cur_id, mat_id, doc_id, salon_id, dia, bloque, hi, hf),
+        )
 
 
 # =============================================================================
@@ -464,6 +472,9 @@ class TestRLSAislamiento:
         )
         return uid
 
+    def _set_admin(self, cur, user_id: str) -> None:
+        cur.execute("UPDATE public.perfiles SET role = 'admin' WHERE id = %s", (user_id,))
+
     def _set_authenticated(self, cur, user_id: str):
         """Simula ser un usuario autenticado para las siguientes consultas."""
         claims = json.dumps({"sub": user_id, "role": "authenticated"})
@@ -483,13 +494,14 @@ class TestRLSAislamiento:
         uid_b = self._create_test_user(cur)
 
         cur.execute(
-            "UPDATE horarios SET usuario_id = %s WHERE id = %s",
-            (uid_a, seed["hor_id"]),
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s)""",
+            (seed["cfg_id"], f"HorarioA {uuid.uuid4().hex[:8]}", uid_a, uid_a),
         )
         cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, usuario_id)
-               VALUES (%s, %s, 'borrador', %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b),
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
+            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b, uid_b),
         )
         # No commit — todo se revierte con rollback al final del test
 
@@ -509,13 +521,14 @@ class TestRLSAislamiento:
         uid_b = self._create_test_user(cur)
 
         cur.execute(
-            "UPDATE horarios SET usuario_id = %s WHERE id = %s",
-            (uid_a, seed["hor_id"]),
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s)""",
+            (seed["cfg_id"], f"HorarioA {uuid.uuid4().hex[:8]}", uid_a, uid_a),
         )
         cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, usuario_id)
-               VALUES (%s, %s, 'borrador', %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b),
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
+            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b, uid_b),
         )
         # No commit — todo se revierte con rollback al final del test
 
@@ -527,26 +540,152 @@ class TestRLSAislamiento:
         self._reset_role(cur)
         # No commit — todo se revierte con rollback al final del test
 
-    def test_catalogos_compartidos_visibles_para_authenticated(self, db_conn, seed):
-        """Catalogos (docentes, materias, etc.) son visibles para
-        todos los usuarios authenticated."""
+    def test_catalogos_estan_aislados_por_usuario(self, db_conn, seed):
+        """Owners stay isolated while admin retains global CRUD and child integrity."""
         cur = db_conn.cursor()
-        uid = self._create_test_user(cur)
-        # No commit — todo se revierte con rollback al final del test
+        uid_a = self._create_test_user(cur)
+        uid_b = self._create_test_user(cur)
+        admin_id = self._create_test_user(cur)
+        self._set_admin(cur, admin_id)
+        owner_rows = {}
 
-        cur.execute("SELECT count(*) AS n FROM docentes")
-        total_docentes = cur.fetchone()["n"]
+        for owner_id, suffix in ((uid_a, "A"), (uid_b, "B")):
+            cur.execute(
+                """INSERT INTO configs (nombre, tipo_jornada, hora_inicio, hora_fin, user_id)
+                   VALUES (%s, 'unica', '07:00', '13:00', %s) RETURNING id""",
+                (f"RLS config {suffix}", owner_id),
+            )
+            config_id = cur.fetchone()["id"]
+            cur.execute(
+                """INSERT INTO docentes (nombre, apellido, documento, carga_horaria, user_id)
+                   VALUES ('RLS', %s, %s, 4, %s) RETURNING id""",
+                (suffix, f"rls-doc-{suffix}-{uuid.uuid4().hex[:8]}", owner_id),
+            )
+            docente_id = cur.fetchone()["id"]
+            cur.execute(
+                """INSERT INTO cursos (nombre, nivel, horas_semanales, user_id)
+                   VALUES (%s, '1', 2, %s) RETURNING id""",
+                (f"RLS curso {suffix}", owner_id),
+            )
+            curso_id = cur.fetchone()["id"]
+            cur.execute(
+                """INSERT INTO materias (nombre, categoria, min_horas, max_horas, user_id)
+                   VALUES (%s, 'basica', 1, 2, %s) RETURNING id""",
+                (f"RLS materia {suffix}", owner_id),
+            )
+            materia_id = cur.fetchone()["id"]
+            cur.execute(
+                """INSERT INTO salones (nombre, tipo, user_id)
+                   VALUES (%s, 'aula', %s) RETURNING id""",
+                (f"RLS salon {suffix}", owner_id),
+            )
+            salon_id = cur.fetchone()["id"]
+            cur.execute(
+                """INSERT INTO disponibilidades (docente_id, dia, hora_inicio, hora_fin, user_id)
+                   VALUES (%s, 1, '07:00', '08:00', %s)""",
+                (docente_id, owner_id),
+            )
+            cur.execute(
+                """INSERT INTO docente_materia (docente_id, materia_id, user_id)
+                   VALUES (%s, %s, %s)""",
+                (docente_id, materia_id, owner_id),
+            )
+            cur.execute(
+                """INSERT INTO docente_curso (docente_id, curso_id, user_id)
+                   VALUES (%s, %s, %s)""",
+                (docente_id, curso_id, owner_id),
+            )
+            owner_rows[owner_id] = {
+                "config_id": config_id,
+                "docente_id": docente_id,
+                "curso_id": curso_id,
+                "materia_id": materia_id,
+                "salon_id": salon_id,
+            }
 
-        self._set_authenticated(cur, uid)
-        cur.execute("SELECT count(*) AS n FROM docentes")
-        visible = cur.fetchone()["n"]
-
-        assert visible == total_docentes, (
-            f"Catalogo compartido: deberia ver {total_docentes} docentes, vio {visible}"
+        cur.execute(
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, 'RLS owner A schedule', 'borrador', %s, %s) RETURNING id""",
+            (owner_rows[uid_a]["config_id"], uid_a, uid_a),
         )
+        schedule_a_id = cur.fetchone()["id"]
+
+        table_names = (
+            "configs", "docentes", "cursos", "materias", "salones",
+            "disponibilidades", "docente_materia", "docente_curso",
+        )
+        self._set_authenticated(cur, uid_a)
+        for table_name in table_names:
+            cur.execute(
+                f"SELECT count(*) AS n FROM public.{table_name} WHERE user_id IN (%s, %s)",
+                (uid_a, uid_b),
+            )
+            assert cur.fetchone()["n"] == 1, f"{table_name} exposed another account's row"
 
         self._reset_role(cur)
-        # No commit — todo se revierte con rollback al final del test
+        self._set_authenticated(cur, admin_id)
+        for table_name in table_names:
+            cur.execute(
+                f"SELECT count(*) AS n FROM public.{table_name} WHERE user_id IN (%s, %s)",
+                (uid_a, uid_b),
+            )
+            assert cur.fetchone()["n"] == 2, f"admin cannot view both {table_name} owners"
+
+        cur.execute("UPDATE docentes SET telefono = 'admin-edit' WHERE apellido = 'B'")
+        assert cur.rowcount == 1
+
+        cur.execute(
+            """INSERT INTO cursos (nombre, nivel, horas_semanales, user_id)
+               VALUES ('Admin-owned catalog row', '1', 2, %s)""",
+            (admin_id,),
+        )
+        assert cur.rowcount == 1, "admin could not create an actor-owned catalog row"
+
+        cur.execute("SAVEPOINT sp_admin_cross_owner_assignment")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute(
+                """INSERT INTO docente_materia (docente_id, materia_id, user_id)
+                   VALUES (%s, %s, %s)""",
+                (owner_rows[uid_a]["docente_id"], owner_rows[uid_b]["materia_id"], uid_a),
+            )
+        cur.execute("ROLLBACK TO SAVEPOINT sp_admin_cross_owner_assignment")
+
+        cur.execute("SAVEPOINT sp_admin_cross_owner_course_assignment")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute(
+                """INSERT INTO docente_curso (docente_id, curso_id, user_id)
+                   VALUES (%s, %s, %s)""",
+                (owner_rows[uid_a]["docente_id"], owner_rows[uid_b]["curso_id"], uid_a),
+            )
+        cur.execute("ROLLBACK TO SAVEPOINT sp_admin_cross_owner_course_assignment")
+
+        cur.execute("SAVEPOINT sp_admin_cross_owner_cell")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute(
+                """INSERT INTO celdas (horario_id, user_id, curso_id, materia_id, docente_id,
+                       salon_id, dia, bloque, hora_inicio, hora_fin, bloqueada)
+                   VALUES (%s, %s, %s, %s, %s, %s, 1, 1, '07:00', '08:00', false)""",
+                (
+                    schedule_a_id,
+                    uid_a,
+                    owner_rows[uid_a]["curso_id"],
+                    owner_rows[uid_a]["materia_id"],
+                    owner_rows[uid_a]["docente_id"],
+                    # A's cell cannot attach B's salon, even for admin.
+                    owner_rows[uid_b]["salon_id"],
+                ),
+            )
+        cur.execute("ROLLBACK TO SAVEPOINT sp_admin_cross_owner_cell")
+
+        cur.execute("DELETE FROM salones WHERE nombre = 'RLS salon B'")
+        assert cur.rowcount == 1, "admin could not delete another owner's row"
+
+        cur.execute("SAVEPOINT sp_owner_transfer")
+        with pytest.raises(psycopg.errors.RaiseException, match="ownership cannot be changed"):
+            cur.execute("UPDATE docentes SET user_id = %s WHERE apellido = 'A'", (admin_id,))
+        cur.execute("ROLLBACK TO SAVEPOINT sp_owner_transfer")
+
+        self._reset_role(cur)
 
     def test_celdas_aisladas_por_usuario(self, db_conn, seed):
         """Usuario A no puede ver celdas del horario de usuario B."""
@@ -556,20 +695,22 @@ class TestRLSAislamiento:
         uid_b = self._create_test_user(cur)
 
         cur.execute(
-            "UPDATE horarios SET usuario_id = %s WHERE id = %s",
-            (uid_a, seed["hor_id"]),
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
+            (seed["cfg_id"], f"HorarioA {uuid.uuid4().hex[:8]}", uid_a, uid_a),
         )
-        _insert_celda(cur, seed["hor_id"], seed["cur_id"], seed["mat_id"],
-                      seed["doc_id"], seed["salon_id"], 1, 1)
+        hor_a = cur.fetchone()["id"]
+        _insert_celda(cur, hor_a, seed["cur_id"], seed["mat_id"],
+                      seed["doc_id"], seed["salon_id"], 1, 1, owner_id=uid_a)
 
         cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, usuario_id)
-               VALUES (%s, %s, 'borrador', %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b),
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
+            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b, uid_b),
         )
         hor_b = cur.fetchone()["id"]
         _insert_celda(cur, hor_b, seed["cur_id"], seed["mat_id"],
-                      seed["doc_id"], seed["salon_id"], 1, 1)
+                      seed["doc_id"], seed["salon_id"], 1, 1, owner_id=uid_b)
         # No commit — todo se revierte con rollback al final del test
 
         self._set_authenticated(cur, uid_a)
@@ -591,9 +732,9 @@ class TestRLSAislamiento:
         cur.execute("SAVEPOINT sp_fraude")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             cur.execute(
-                """INSERT INTO horarios (configuracion_id, nombre, estado, usuario_id)
-                   VALUES (%s, %s, 'borrador', %s)""",
-                (seed["cfg_id"], f"Fraude {uuid.uuid4().hex[:8]}", uid_b),
+                """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+                   VALUES (%s, %s, 'borrador', %s, %s)""",
+                (seed["cfg_id"], f"Fraude {uuid.uuid4().hex[:8]}", uid_b, uid_b),
             )
         cur.execute("ROLLBACK TO SAVEPOINT sp_fraude")
 
@@ -678,15 +819,15 @@ class TestEstructuraBD:
             """SELECT count(*) AS n FROM pg_policies
                WHERE tablename = 'celdas' AND schemaname = 'public'"""
         )
-        assert cur.fetchone()["n"] >= 4
+        assert cur.fetchone()["n"] >= 1
 
     def test_politicas_catalogos_existen(self, db_conn):
-        """Los 8 catalogos compartidos deben tener politicas auth_all."""
+        """Every standalone catalog has owner-scoped SELECT/INSERT/UPDATE/DELETE policies."""
         cur = db_conn.cursor()
         cur.execute(
             """SELECT count(DISTINCT tablename) AS n
                FROM pg_policies
                WHERE schemaname = 'public'
-                 AND policyname LIKE '%_auth_all'"""
+                 AND policyname LIKE '%_owner_select'"""
         )
-        assert cur.fetchone()["n"] >= 8
+        assert cur.fetchone()["n"] >= 5

@@ -237,7 +237,7 @@ def test_admin_can_read_shared_schedules():
 def test_docente_schedule_reads_remain_scoped_to_their_own_records():
     conn = _ScheduleConnection()
     _load_horario(conn, horario_id=42, usuario_id="teacher-1", role="docente")
-    assert "usuario_id = %s" in conn.cursor_instance.sql
+    assert "user_id = %s" in conn.cursor_instance.sql
     assert conn.cursor_instance.params == (42, "teacher-1")
 
 

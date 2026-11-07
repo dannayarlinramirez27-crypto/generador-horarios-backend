@@ -53,6 +53,7 @@ class _ConnFake:
             "nombre": _NOMBRE,
             "configuracion_id": 1,
             "estado": "borrador",
+            "user_id": "test-user-uuid",
             "usuario_id": "test-user-uuid",
         }
         self.filas: list[dict] = [self.fila]
@@ -111,7 +112,7 @@ def test_generar_regeneracion_inserta_celdas_antes_del_estado_completo(
     """
     conn = _ConnFake()
     monkeypatch.setattr(
-        horarios_router, "load_problem", lambda _conn, _hid: (problem_ok, None)
+        horarios_router, "load_problem", lambda _conn, _hid, **_kwargs: (problem_ok, None)
     )
     monkeypatch.setattr(horarios_router, "solve", lambda _problem: _resultado_completo())
 
@@ -142,6 +143,54 @@ def test_generar_regeneracion_inserta_celdas_antes_del_estado_completo(
     assert idx_delete < idx_insert < idx_estado_completo
     assert respuesta["estado"] == "completo"
     assert respuesta["horario"]["estado"] == "completo"
+
+
+def test_admin_regeneration_loads_existing_schedule_owner_inputs(monkeypatch, problem_ok):
+    conn = _ConnFake()
+    conn.fila["user_id"] = "teacher-owner-uuid"
+    calls = []
+
+    def load_problem(_conn, horario_id, *, owner_id, admin):
+        calls.append((horario_id, owner_id, admin))
+        return problem_ok, None
+
+    monkeypatch.setattr(horarios_router, "load_problem", load_problem)
+    monkeypatch.setattr(horarios_router, "solve", lambda _problem: _resultado_completo())
+
+    horarios_router.generar(
+        {"nombre": _NOMBRE, "horario_id": _HORARIO_ID},
+        conn,
+        {"sub": "admin-owner-uuid", "app_metadata": {"role": "admin"}},
+    )
+
+    assert calls == [(_HORARIO_ID, "teacher-owner-uuid", True)]
+
+
+def test_new_admin_schedule_loads_admin_owned_inputs(monkeypatch, problem_ok):
+    conn = _ConnFake()
+    conn.fila["user_id"] = "admin-owner-uuid"
+    calls = []
+
+    def load_problem(_conn, horario_id, *, owner_id, admin):
+        calls.append((horario_id, owner_id, admin))
+        return problem_ok, None
+
+    monkeypatch.setattr(horarios_router, "load_problem", load_problem)
+    monkeypatch.setattr(horarios_router, "solve", lambda _problem: _resultado_completo())
+
+    horarios_router.generar(
+        {"nombre": _NOMBRE},
+        conn,
+        {"sub": "admin-owner-uuid", "app_metadata": {"role": "admin"}},
+    )
+
+    assert calls == [(None, "admin-owner-uuid", True)]
+    schedule_insert = next(
+        (sql, params)
+        for sql, params in zip(conn.sqls, conn.params)
+        if "INSERT INTO horarios" in sql
+    )
+    assert schedule_insert[1][-2:] == ("admin-owner-uuid", "admin-owner-uuid")
 
 
 class _InsertCeldasCursorFake:
@@ -194,18 +243,22 @@ def test_insert_celdas_uses_one_multirow_insert_and_returns_all_rows():
             "hora_fin": time(9, 0),
         },
     ]
-    returned_rows = [{"id": 101, **celdas[0]}, {"id": 102, **celdas[1]}]
+    returned_rows = [
+        {"id": 101, "user_id": "test-user-uuid", **celdas[0]},
+        {"id": 102, "user_id": "test-user-uuid", **celdas[1]},
+    ]
     conn = _InsertCeldasConnFake(returned_rows)
 
-    filas = horarios_router._insert_celdas(conn, _HORARIO_ID, celdas)
+    filas = horarios_router._insert_celdas(conn, _HORARIO_ID, "test-user-uuid", celdas)
 
     assert len(conn.executions) == 1
     sql, params = conn.executions[0]
     assert "INSERT INTO celdas" in sql
-    assert sql.count("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)") == 2
+    assert sql.count("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)") == 2
     assert "RETURNING *" in sql
     assert params == (
         _HORARIO_ID,
+        "test-user-uuid",
         1,
         11,
         21,
@@ -216,6 +269,7 @@ def test_insert_celdas_uses_one_multirow_insert_and_returns_all_rows():
         time(8, 0),
         True,
         _HORARIO_ID,
+        "test-user-uuid",
         2,
         12,
         22,
@@ -232,5 +286,5 @@ def test_insert_celdas_uses_one_multirow_insert_and_returns_all_rows():
 def test_insert_celdas_empty_input_returns_without_query():
     conn = _InsertCeldasConnFake([])
 
-    assert horarios_router._insert_celdas(conn, _HORARIO_ID, []) == []
+    assert horarios_router._insert_celdas(conn, _HORARIO_ID, "test-user-uuid", []) == []
     assert conn.executions == []

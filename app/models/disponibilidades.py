@@ -1,5 +1,6 @@
 from datetime import time
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -33,3 +34,4 @@ class DisponibilidadOut(DisponibilidadBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: UUID

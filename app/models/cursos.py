@@ -1,4 +1,5 @@
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,3 +28,4 @@ class CursoOut(CursoBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: UUID

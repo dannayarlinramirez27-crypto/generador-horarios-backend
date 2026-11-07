@@ -1,5 +1,6 @@
 from datetime import datetime, time
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,5 +55,6 @@ class CeldaOut(CeldaBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: UUID
     created_at: datetime
     updated_at: datetime

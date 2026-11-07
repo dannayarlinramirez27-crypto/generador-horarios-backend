@@ -1,12 +1,13 @@
 """Router CRUD de salones y laboratorios (tabla `salones`)."""
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from psycopg.rows import dict_row
 
 from app.auth import get_current_user, require_roles
 from app.db import get_db
 from app.models.salones import SalonCreate, SalonUpdate, SalonOut
+from app.ownership import fetch_owned_record, owner_scope, request_role
 from app.routers._common import build_update_statement, raise_db_error
 
 router = APIRouter(
@@ -23,12 +24,15 @@ MODULE_ROLES = ["admin", "docente"]
 def list_salones(
     activo: bool | None = None,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista salones; opcionalmente filtra por `activo`."""
     query = f"SELECT * FROM {TABLE}"
-    params: list = []
+    predicate, owner_params = owner_scope(request_role(usuario, conn), usuario["sub"])
+    query += f" WHERE {predicate}"
+    params: list = list(owner_params)
     if activo is not None:
-        query += " WHERE activo = %s"
+        query += " AND activo = %s"
         params.append(activo)
     query += " ORDER BY nombre"
     with conn.cursor(row_factory=dict_row) as cur:
@@ -40,34 +44,28 @@ def list_salones(
 def get_salon(
     salon_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Devuelve un salón por su id."""
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(f"SELECT * FROM {TABLE} WHERE id = %s", (salon_id,))
-        row = cur.fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Salón {salon_id} no encontrado.",
-        )
-    return dict(row)
+    return fetch_owned_record(conn, TABLE, salon_id, request_role(usuario, conn), usuario["sub"], "Salón")
 
 
 @router.post("", response_model=SalonOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles(MODULE_ROLES))])
 def create_salon(
     payload: SalonCreate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Crea un salón (nombre único)."""
     try:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"""
-                INSERT INTO {TABLE} (nombre, tipo, capacidad, activo)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO {TABLE} (nombre, tipo, capacidad, activo, user_id)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING *
                 """,
-                (payload.nombre, payload.tipo, payload.capacidad, payload.activo),
+                (payload.nombre, payload.tipo, payload.capacidad, payload.activo, usuario["sub"]),
             )
             row = cur.fetchone()
         return dict(row)
@@ -80,10 +78,11 @@ def update_salon(
     salon_id: int,
     payload: SalonUpdate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Actualiza parcialmente un salón."""
     updates = payload.model_dump(exclude_unset=True)
-    get_salon(salon_id, conn)  # 404 temprano
+    get_salon(salon_id, conn, usuario)  # 404 temprano
     try:
         sql, params = build_update_statement(TABLE, "id", salon_id, updates)
         with conn.cursor(row_factory=dict_row) as cur:
@@ -98,9 +97,10 @@ def update_salon(
 def delete_salon(
     salon_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> None:
     """Elimina un salón (cascada sobre celdas)."""
-    get_salon(salon_id, conn)  # 404 temprano
+    get_salon(salon_id, conn, usuario)  # 404 temprano
     try:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {TABLE} WHERE id = %s", (salon_id,))

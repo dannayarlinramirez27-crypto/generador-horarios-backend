@@ -40,7 +40,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          PYTHONPATH=. pytest tests/test_auth.py tests/test_solver.py tests/test_intensity.py tests/test_validation.py tests/test_horarios_regeneracion.py -v --tb=short
+          PYTHONPATH=. pytest tests/test_auth.py tests/test_ownership.py tests/test_solver.py tests/test_intensity.py tests/test_validation.py tests/test_horarios_regeneracion.py -v --tb=short
 
   # ─────────────────────────────────────────────────────────────
   # Tests de integración SQL — contenedor Postgres local en CI

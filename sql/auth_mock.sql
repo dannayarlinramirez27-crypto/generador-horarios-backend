@@ -39,6 +39,17 @@ VALUES ('00000000-0000-0000-0000-000000000000',
         now(), '{}'::jsonb, '{}'::jsonb, now(), now())
 ON CONFLICT (id) DO NOTHING;
 
+-- Deterministic local seed owner used by sql/seed.sql and the authorized
+-- legacy-owner backfill migration. This is test-only data, not a live account.
+INSERT INTO auth.users (id, instance_id, aud, role, email,
+                        email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+                        created_at, updated_at)
+VALUES ('f66d8637-c374-4602-b748-b9b9737abfbf',
+        '00000000-0000-0000-0000-000000000000',
+        'authenticated', 'authenticated', 'legacy-admin@localhost',
+        now(), '{"role":"admin"}'::jsonb, '{}'::jsonb, now(), now())
+ON CONFLICT (id) DO NOTHING;
+
 -- auth.uid(): devuelve el UUID del usuario actual desde request.jwt.claims.
 -- En CI sin JWT, devuelve un UUID fijo para que DEFAULT auth.uid() no sea NULL.
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid

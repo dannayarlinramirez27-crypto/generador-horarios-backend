@@ -18,6 +18,7 @@ from app.models.asignaciones import (
     DocenteCursoCreate,
     DocenteCursoOut,
 )
+from app.ownership import fetch_owned_record, owner_scope, referenced_owner, request_role
 
 
 router = APIRouter(
@@ -28,14 +29,8 @@ router = APIRouter(
 MODULE_ROLES = ["admin", "docente"]
 
 
-def _docente_existe(conn, docente_id: int) -> None:
-    with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM docentes WHERE id = %s", (docente_id,))
-        if cur.fetchone() is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Docente {docente_id} no encontrado.",
-            )
+def _docente_existe(conn, docente_id: int, role: str, user_id: str) -> dict:
+    return fetch_owned_record(conn, "docentes", docente_id, role, user_id, "Docente")
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +41,12 @@ def _docente_existe(conn, docente_id: int) -> None:
 @router.get("/materias", response_model=list[DocenteMateriaOut], dependencies=[Depends(require_roles(MODULE_ROLES))])
 def list_docente_materias(
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista todas las asignaciones docente ↔ materia."""
+    predicate, params = owner_scope(request_role(usuario, conn), usuario["sub"])
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM docente_materia ORDER BY docente_id, materia_id")
+        cur.execute(f"SELECT * FROM docente_materia WHERE {predicate} ORDER BY docente_id, materia_id", params)
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -57,14 +54,16 @@ def list_docente_materias(
 def list_materias_de_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista las materias que puede dictar un docente."""
     try:
-        _docente_existe(conn, docente_id)
+        role = request_role(usuario, conn)
+        docente = _docente_existe(conn, docente_id, role, usuario["sub"])
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT * FROM docente_materia WHERE docente_id = %s ORDER BY materia_id",
-                (docente_id,),
+                "SELECT * FROM docente_materia WHERE docente_id = %s AND user_id = %s ORDER BY materia_id",
+                (docente_id, docente["user_id"]),
             )
             return [dict(r) for r in cur.fetchall()]
     except HTTPException:
@@ -86,18 +85,24 @@ def list_materias_de_docente(
 def assign_materia_a_docente(
     payload: DocenteMateriaCreate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Asigna una materia a un docente (UNIQUE docente+materia)."""
-    _docente_existe(conn, payload.docente_id)
+    role = request_role(usuario, conn)
+    docente = _docente_existe(conn, payload.docente_id, role, usuario["sub"])
+    referenced_owner(
+        conn, "materias", payload.materia_id, role=role, actor_id=usuario["sub"],
+        expected_owner_id=docente["user_id"], label="Materia",
+    )
     try:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                INSERT INTO docente_materia (docente_id, materia_id)
-                VALUES (%s, %s)
+                INSERT INTO docente_materia (docente_id, materia_id, user_id)
+                VALUES (%s, %s, %s)
                 RETURNING *
                 """,
-                (payload.docente_id, payload.materia_id),
+                (payload.docente_id, payload.materia_id, docente["user_id"]),
             )
             row = cur.fetchone()
         return dict(row)
@@ -114,13 +119,15 @@ def unassign_materia_de_docente(
     docente_id: int,
     materia_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> None:
     """Quita la materia que un docente dicta."""
+    docente = _docente_existe(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM docente_materia WHERE docente_id = %s AND materia_id = %s",
-                (docente_id, materia_id),
+                "DELETE FROM docente_materia WHERE docente_id = %s AND materia_id = %s AND user_id = %s",
+                (docente_id, materia_id, docente["user_id"]),
             )
             if cur.rowcount == 0:
                 raise HTTPException(
@@ -145,10 +152,12 @@ def unassign_materia_de_docente(
 @router.get("/cursos", response_model=list[DocenteCursoOut], dependencies=[Depends(require_roles(MODULE_ROLES))])
 def list_docente_cursos(
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista todas las asignaciones docente ↔ curso."""
+    predicate, params = owner_scope(request_role(usuario, conn), usuario["sub"])
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM docente_curso ORDER BY docente_id, curso_id")
+        cur.execute(f"SELECT * FROM docente_curso WHERE {predicate} ORDER BY docente_id, curso_id", params)
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -156,14 +165,16 @@ def list_docente_cursos(
 def list_cursos_de_docente(
     docente_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Lista los cursos que le corresponden dar a un docente."""
     try:
-        _docente_existe(conn, docente_id)
+        role = request_role(usuario, conn)
+        docente = _docente_existe(conn, docente_id, role, usuario["sub"])
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT * FROM docente_curso WHERE docente_id = %s ORDER BY curso_id",
-                (docente_id,),
+                "SELECT * FROM docente_curso WHERE docente_id = %s AND user_id = %s ORDER BY curso_id",
+                (docente_id, docente["user_id"]),
             )
             return [dict(r) for r in cur.fetchall()]
     except HTTPException:
@@ -185,18 +196,24 @@ def list_cursos_de_docente(
 def assign_curso_a_docente(
     payload: DocenteCursoCreate,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> dict:
     """Asigna un curso a un docente (UNIQUE docente+curso)."""
-    _docente_existe(conn, payload.docente_id)
+    role = request_role(usuario, conn)
+    docente = _docente_existe(conn, payload.docente_id, role, usuario["sub"])
+    referenced_owner(
+        conn, "cursos", payload.curso_id, role=role, actor_id=usuario["sub"],
+        expected_owner_id=docente["user_id"], label="Curso",
+    )
     try:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                INSERT INTO docente_curso (docente_id, curso_id)
-                VALUES (%s, %s)
+                INSERT INTO docente_curso (docente_id, curso_id, user_id)
+                VALUES (%s, %s, %s)
                 RETURNING *
                 """,
-                (payload.docente_id, payload.curso_id),
+                (payload.docente_id, payload.curso_id, docente["user_id"]),
             )
             row = cur.fetchone()
         return dict(row)
@@ -213,13 +230,15 @@ def unassign_curso_de_docente(
     docente_id: int,
     curso_id: int,
     conn: psycopg.Connection = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
 ) -> None:
     """Quita el curso que corresponde a un docente."""
+    docente = _docente_existe(conn, docente_id, request_role(usuario, conn), usuario["sub"])
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM docente_curso WHERE docente_id = %s AND curso_id = %s",
-                (docente_id, curso_id),
+                "DELETE FROM docente_curso WHERE docente_id = %s AND curso_id = %s AND user_id = %s",
+                (docente_id, curso_id, docente["user_id"]),
             )
             if cur.rowcount == 0:
                 raise HTTPException(

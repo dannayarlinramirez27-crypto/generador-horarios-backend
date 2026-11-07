@@ -1,5 +1,6 @@
 from datetime import datetime, time
 from typing import Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -49,4 +50,5 @@ class ConfigOut(ConfigBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: UUID
     created_at: datetime

@@ -12,6 +12,7 @@ BEGIN;
 -- 1. JORNADA / CONFIGURACIÓN (políticas institucionales)
 CREATE TABLE IF NOT EXISTS configs (
     id                integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id           uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     nombre            text NOT NULL DEFAULT 'Configuración general',
     tipo_jornada      text NOT NULL CHECK (tipo_jornada IN ('manana','tarde','unica')),
     dias_laborables   smallint[] NOT NULL DEFAULT '{1,2,3,4,5}'
@@ -23,20 +24,23 @@ CREATE TABLE IF NOT EXISTS configs (
     created_at        timestamptz NOT NULL DEFAULT now()
 );
 -- Solo una configuración activa a la vez
-CREATE UNIQUE INDEX IF NOT EXISTS uidx_configs_activa ON configs (activa) WHERE activa = true;
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_configs_activa ON configs (user_id) WHERE activa = true;
 
 -- 2. DOCENTES (con carga académica contractual)
 CREATE TABLE IF NOT EXISTS docentes (
     id            integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id       uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     nombre        text NOT NULL,
     apellido      text NOT NULL,
-    documento     text NOT NULL UNIQUE,
+    documento     text NOT NULL,
     telefono      text,
-    email         text UNIQUE,
+    email         text,
     carga_horaria integer NOT NULL CHECK (carga_horaria > 0),
     activo        boolean NOT NULL DEFAULT true,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_docentes_user_documento ON docentes (user_id, documento);
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_docentes_user_email ON docentes (user_id, email) WHERE email IS NOT NULL;
 
 -- 2a. PERFILES DE AUTENTICACIÓN (separados del catálogo de docentes)
 CREATE TABLE IF NOT EXISTS public.perfiles (
@@ -95,18 +99,21 @@ ON CONFLICT (id) DO NOTHING;
 -- 3. CURSOS / GRADOS (nivel + carga horaria semanal)
 CREATE TABLE IF NOT EXISTS cursos (
     id             integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre         text NOT NULL UNIQUE,               -- ej: 6°A
+    user_id        uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+    nombre         text NOT NULL,                      -- ej: 6°A
     nivel          text NOT NULL,                      -- ej: 6, 7, 10
     horas_semanales integer NOT NULL CHECK (horas_semanales > 0),  -- 30 / 37
     orden          smallint NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_cursos_user_nombre ON cursos (user_id, nombre);
 
 -- 4. MATERIAS (categoría + rango de intensidad + políticas)
 --    §5.5 Intensidad en rango por categoría se valida también en la API
 --    (configurable por institución); aquí se garantiza min <= max.
 CREATE TABLE IF NOT EXISTS materias (
     id                   integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre               text NOT NULL UNIQUE,
+    user_id              uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+    nombre               text NOT NULL,
     categoria            text NOT NULL CHECK (categoria IN ('basica','media_tecnica','otras')),
     min_horas            smallint NOT NULL DEFAULT 3 CHECK (min_horas >= 1),
     max_horas            smallint NOT NULL DEFAULT 5 CHECK (max_horas >= min_horas),
@@ -117,19 +124,23 @@ CREATE TABLE IF NOT EXISTS materias (
     CHECK ((requiere_salon AND tipo_salon_requerido IS NOT NULL)
         OR (NOT requiere_salon AND tipo_salon_requerido IS NULL))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_materias_user_nombre ON materias (user_id, nombre);
 
 -- 5. SALONES / LABORATORIOS
 CREATE TABLE IF NOT EXISTS salones (
     id        integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre    text NOT NULL UNIQUE,
+    user_id   uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+    nombre    text NOT NULL,
     tipo      text NOT NULL CHECK (tipo IN ('aula','laboratorio','sala')),
     capacidad integer NOT NULL DEFAULT 0 CHECK (capacidad >= 0),
     activo    boolean NOT NULL DEFAULT true
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_salones_user_nombre ON salones (user_id, nombre);
 
 -- 6. DISPONIBILIDADES (ventanas horarias de cada docente)
 CREATE TABLE IF NOT EXISTS disponibilidades (
     id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id     uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     docente_id  integer NOT NULL REFERENCES docentes(id) ON DELETE CASCADE,
     dia         smallint NOT NULL CHECK (dia BETWEEN 1 AND 7),
     hora_inicio time NOT NULL,
@@ -140,6 +151,7 @@ CREATE TABLE IF NOT EXISTS disponibilidades (
 -- 7. MATERIAS QUE PUEDE DICTAR CADA DOCENTE  (§5.1 Materias asignadas)
 CREATE TABLE IF NOT EXISTS docente_materia (
     id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id     uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     docente_id  integer NOT NULL REFERENCES docentes(id) ON DELETE CASCADE,
     materia_id  integer NOT NULL REFERENCES materias(id) ON DELETE CASCADE,
     UNIQUE (docente_id, materia_id)
@@ -148,6 +160,7 @@ CREATE TABLE IF NOT EXISTS docente_materia (
 -- 8. CURSOS QUE LE CORRESPONDE DAR A CADA DOCENTE  (§5.1 Cursos)
 CREATE TABLE IF NOT EXISTS docente_curso (
     id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id     uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     docente_id  integer NOT NULL REFERENCES docentes(id) ON DELETE CASCADE,
     curso_id    integer NOT NULL REFERENCES cursos(id) ON DELETE CASCADE,
     UNIQUE (docente_id, curso_id)
@@ -156,6 +169,7 @@ CREATE TABLE IF NOT EXISTS docente_curso (
 -- 9. HORARIOS (una versión/generación del horario)
 CREATE TABLE IF NOT EXISTS horarios (
     id                integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id           uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     configuracion_id  integer NOT NULL REFERENCES configs(id) ON DELETE RESTRICT,
     usuario_id        uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     nombre            text NOT NULL DEFAULT 'Horario',
@@ -163,11 +177,12 @@ CREATE TABLE IF NOT EXISTS horarios (
                       CHECK (estado IN ('borrador','completo','parcial')),
     created_at        timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_horarios_usuario ON horarios (usuario_id);
+CREATE INDEX IF NOT EXISTS idx_horarios_usuario ON horarios (user_id);
 
 -- 10. CELDAS (celda (curso,materia,docente,salon,dia,bloque,...)) — modelo §6.2
 CREATE TABLE IF NOT EXISTS celdas (
     id           integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id      uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
     horario_id   integer NOT NULL REFERENCES horarios(id) ON DELETE CASCADE,
     curso_id     integer NOT NULL REFERENCES cursos(id) ON DELETE CASCADE,
     materia_id   integer NOT NULL REFERENCES materias(id) ON DELETE CASCADE,
@@ -196,6 +211,56 @@ CREATE INDEX IF NOT EXISTS idx_docente_curso_curso   ON docente_curso (curso_id)
 CREATE INDEX IF NOT EXISTS idx_celdas_horario        ON celdas (horario_id);
 CREATE INDEX IF NOT EXISTS idx_celdas_curso_dia      ON celdas (horario_id, curso_id, dia, bloque);   -- vista por curso
 CREATE INDEX IF NOT EXISTS idx_celdas_docente_dia    ON celdas (horario_id, docente_id, dia, bloque); -- vista por docente
+CREATE INDEX IF NOT EXISTS idx_disponibilidades_user ON disponibilidades (user_id, docente_id);
+CREATE INDEX IF NOT EXISTS idx_docente_materia_user ON docente_materia (user_id, docente_id);
+CREATE INDEX IF NOT EXISTS idx_docente_curso_user ON docente_curso (user_id, docente_id);
+CREATE INDEX IF NOT EXISTS idx_celdas_user ON celdas (user_id, horario_id);
+
+-- Every row keeps the server-assigned owner immutable. Legacy schedule aliases
+-- remain equal for compatibility; child rows are owned by their parent.
+CREATE OR REPLACE FUNCTION public.validate_row_ownership()
+RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+DECLARE
+    parent_owner uuid;
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'user_id ownership cannot be changed';
+    END IF;
+
+    IF TG_TABLE_NAME = 'horarios' AND NEW.user_id IS DISTINCT FROM NEW.usuario_id THEN
+        RAISE EXCEPTION 'horarios.user_id and horarios.usuario_id must match';
+    END IF;
+
+    IF TG_TABLE_NAME = 'disponibilidades' THEN
+        SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
+    ELSIF TG_TABLE_NAME IN ('docente_materia', 'docente_curso') THEN
+        SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
+    ELSIF TG_TABLE_NAME IN ('celdas', 'horarios_celdas') THEN
+        SELECT h.user_id INTO parent_owner FROM public.horarios h WHERE h.id = NEW.horario_id;
+    END IF;
+
+    IF parent_owner IS NOT NULL AND NEW.user_id IS DISTINCT FROM parent_owner THEN
+        RAISE EXCEPTION 'dependent row user_id must match its parent owner';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DO $$
+DECLARE table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'configs', 'docentes', 'cursos', 'materias', 'salones',
+        'disponibilidades', 'docente_materia', 'docente_curso', 'horarios', 'celdas'
+    ] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_validate_row_ownership ON public.%I', table_name);
+        EXECUTE format(
+            'CREATE TRIGGER trg_validate_row_ownership BEFORE INSERT OR UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.validate_row_ownership()',
+            table_name
+        );
+    END LOOP;
+END;
+$$;
 
 -- ============================================================================
 -- 11. RESTRICCIONES ENTRE TABLAS (TRIGGERS) — materializan PLAN §5
@@ -326,6 +391,8 @@ BEGIN
           FROM cursos cu
           LEFT JOIN celdas cc
             ON cc.curso_id = cu.id AND cc.horario_id = NEW.id
+           AND cc.user_id = NEW.user_id
+         WHERE cu.user_id = NEW.user_id
          GROUP BY cu.id, cu.nombre, cu.horas_semanales
         HAVING COALESCE(SUM(EXTRACT(EPOCH FROM (cc.hora_fin - cc.hora_inicio)) / 60), 0)
                <> cu.horas_semanales * 60
@@ -340,6 +407,8 @@ BEGIN
         SELECT 1
           FROM materias m
           JOIN celdas c ON c.materia_id = m.id AND c.horario_id = NEW.id
+                       AND c.user_id = NEW.user_id
+         WHERE m.user_id = NEW.user_id
          GROUP BY m.id, m.nombre, m.min_horas, m.max_horas, c.curso_id
         HAVING SUM(EXTRACT(EPOCH FROM (c.hora_fin - c.hora_inicio)) / 60)
                NOT BETWEEN m.min_horas * 60 AND m.max_horas * 60
@@ -352,6 +421,8 @@ BEGIN
         SELECT 1
           FROM docentes d
           JOIN celdas c ON c.docente_id = d.id AND c.horario_id = NEW.id
+                       AND c.user_id = NEW.user_id
+         WHERE d.user_id = NEW.user_id
          GROUP BY d.id, d.nombre, d.carga_horaria
         HAVING SUM(EXTRACT(EPOCH FROM (c.hora_fin - c.hora_inicio)) / 60)
                > d.carga_horaria * 60
