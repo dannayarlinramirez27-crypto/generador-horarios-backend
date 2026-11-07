@@ -472,6 +472,67 @@ class TestRLSAislamiento:
         )
         return uid
 
+    def _create_owned_schedule(self, cur, owner_id: str, suffix: str):
+        """Create a schedule and all referenced rows under one account owner."""
+        cur.execute(
+            """INSERT INTO configs (nombre, tipo_jornada, dias_laborables,
+                   hora_inicio, hora_fin, minutos_bloque, activa, user_id)
+               VALUES (%s, 'unica', '{1,2,3,4,5}', '07:00', '13:00', 60, false, %s)
+               RETURNING id""",
+            (f"RLS config {suffix}", owner_id),
+        )
+        config_id = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO docentes (nombre, apellido, documento, carga_horaria, activo, user_id)
+               VALUES ('RLS', %s, %s, 2, true, %s) RETURNING id""",
+            (suffix, f"rls-doc-{suffix}-{uuid.uuid4().hex[:8]}", owner_id),
+        )
+        docente_id = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO disponibilidades (docente_id, dia, hora_inicio, hora_fin, user_id)
+               VALUES (%s, 1, '07:00', '13:00', %s)""",
+            (docente_id, owner_id),
+        )
+        cur.execute(
+            """INSERT INTO materias (nombre, categoria, min_horas, max_horas, user_id)
+               VALUES (%s, 'basica', 1, 2, %s) RETURNING id""",
+            (f"RLS materia {suffix}", owner_id),
+        )
+        materia_id = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO salones (nombre, tipo, capacidad, activo, user_id)
+               VALUES (%s, 'aula', 30, true, %s) RETURNING id""",
+            (f"RLS salon {suffix}", owner_id),
+        )
+        salon_id = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO cursos (nombre, nivel, horas_semanales, user_id)
+               VALUES (%s, '1', 2, %s) RETURNING id""",
+            (f"RLS curso {suffix}", owner_id),
+        )
+        curso_id = cur.fetchone()["id"]
+        cur.execute(
+            "INSERT INTO docente_materia (docente_id, materia_id, user_id) VALUES (%s, %s, %s)",
+            (docente_id, materia_id, owner_id),
+        )
+        cur.execute(
+            "INSERT INTO docente_curso (docente_id, curso_id, user_id) VALUES (%s, %s, %s)",
+            (docente_id, curso_id, owner_id),
+        )
+        cur.execute(
+            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
+               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
+            (config_id, f"RLS schedule {suffix}", owner_id, owner_id),
+        )
+        return {
+            "config_id": config_id,
+            "docente_id": docente_id,
+            "materia_id": materia_id,
+            "salon_id": salon_id,
+            "curso_id": curso_id,
+            "horario_id": cur.fetchone()["id"],
+        }
+
     def _set_admin(self, cur, user_id: str) -> None:
         cur.execute("UPDATE public.perfiles SET role = 'admin' WHERE id = %s", (user_id,))
 
@@ -493,16 +554,8 @@ class TestRLSAislamiento:
         uid_a = self._create_test_user(cur)
         uid_b = self._create_test_user(cur)
 
-        cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
-               VALUES (%s, %s, 'borrador', %s, %s)""",
-            (seed["cfg_id"], f"HorarioA {uuid.uuid4().hex[:8]}", uid_a, uid_a),
-        )
-        cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
-               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b, uid_b),
-        )
+        self._create_owned_schedule(cur, uid_a, f"{uid_a[:8]}-A")
+        self._create_owned_schedule(cur, uid_b, f"{uid_b[:8]}-B")
         # No commit — todo se revierte con rollback al final del test
 
         self._set_authenticated(cur, uid_a)
@@ -520,16 +573,8 @@ class TestRLSAislamiento:
         uid_a = self._create_test_user(cur)
         uid_b = self._create_test_user(cur)
 
-        cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
-               VALUES (%s, %s, 'borrador', %s, %s)""",
-            (seed["cfg_id"], f"HorarioA {uuid.uuid4().hex[:8]}", uid_a, uid_a),
-        )
-        cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
-               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b, uid_b),
-        )
+        self._create_owned_schedule(cur, uid_a, f"{uid_a[:8]}-A")
+        self._create_owned_schedule(cur, uid_b, f"{uid_b[:8]}-B")
         # No commit — todo se revierte con rollback al final del test
 
         self._set_authenticated(cur, uid_b)
@@ -642,7 +687,7 @@ class TestRLSAislamiento:
         assert cur.rowcount == 1, "admin could not create an actor-owned catalog row"
 
         cur.execute("SAVEPOINT sp_admin_cross_owner_assignment")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with pytest.raises(psycopg.errors.RaiseException, match="docente_materia materia owner"):
             cur.execute(
                 """INSERT INTO docente_materia (docente_id, materia_id, user_id)
                    VALUES (%s, %s, %s)""",
@@ -651,7 +696,7 @@ class TestRLSAislamiento:
         cur.execute("ROLLBACK TO SAVEPOINT sp_admin_cross_owner_assignment")
 
         cur.execute("SAVEPOINT sp_admin_cross_owner_course_assignment")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with pytest.raises(psycopg.errors.RaiseException, match="docente_curso curso owner"):
             cur.execute(
                 """INSERT INTO docente_curso (docente_id, curso_id, user_id)
                    VALUES (%s, %s, %s)""",
@@ -660,7 +705,7 @@ class TestRLSAislamiento:
         cur.execute("ROLLBACK TO SAVEPOINT sp_admin_cross_owner_course_assignment")
 
         cur.execute("SAVEPOINT sp_admin_cross_owner_cell")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with pytest.raises(psycopg.errors.RaiseException, match="celdas salon owner"):
             cur.execute(
                 """INSERT INTO celdas (horario_id, user_id, curso_id, materia_id, docente_id,
                        salon_id, dia, bloque, hora_inicio, hora_fin, bloqueada)
@@ -694,23 +739,14 @@ class TestRLSAislamiento:
         uid_a = self._create_test_user(cur)
         uid_b = self._create_test_user(cur)
 
-        cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
-               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioA {uuid.uuid4().hex[:8]}", uid_a, uid_a),
-        )
-        hor_a = cur.fetchone()["id"]
-        _insert_celda(cur, hor_a, seed["cur_id"], seed["mat_id"],
-                      seed["doc_id"], seed["salon_id"], 1, 1, owner_id=uid_a)
-
-        cur.execute(
-            """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
-               VALUES (%s, %s, 'borrador', %s, %s) RETURNING id""",
-            (seed["cfg_id"], f"HorarioB {uuid.uuid4().hex[:8]}", uid_b, uid_b),
-        )
-        hor_b = cur.fetchone()["id"]
-        _insert_celda(cur, hor_b, seed["cur_id"], seed["mat_id"],
-                      seed["doc_id"], seed["salon_id"], 1, 1, owner_id=uid_b)
+        tenant_a = self._create_owned_schedule(cur, uid_a, f"{uid_a[:8]}-A")
+        tenant_b = self._create_owned_schedule(cur, uid_b, f"{uid_b[:8]}-B")
+        _insert_celda(cur, tenant_a["horario_id"], tenant_a["curso_id"],
+                      tenant_a["materia_id"], tenant_a["docente_id"],
+                      tenant_a["salon_id"], 1, 1, owner_id=uid_a)
+        _insert_celda(cur, tenant_b["horario_id"], tenant_b["curso_id"],
+                      tenant_b["materia_id"], tenant_b["docente_id"],
+                      tenant_b["salon_id"], 1, 1, owner_id=uid_b)
         # No commit — todo se revierte con rollback al final del test
 
         self._set_authenticated(cur, uid_a)
@@ -726,6 +762,12 @@ class TestRLSAislamiento:
         cur = db_conn.cursor()
         uid_a = self._create_test_user(cur)
         uid_b = self._create_test_user(cur)
+        cur.execute(
+            """INSERT INTO configs (nombre, tipo_jornada, hora_inicio, hora_fin, user_id)
+               VALUES (%s, 'unica', '07:00', '13:00', %s) RETURNING id""",
+            (f"Fraud target config {uuid.uuid4().hex[:8]}", uid_b),
+        )
+        config_b_id = cur.fetchone()["id"]
         # No commit — todo se revierte con rollback al final del test
 
         self._set_authenticated(cur, uid_a)
@@ -734,7 +776,7 @@ class TestRLSAislamiento:
             cur.execute(
                 """INSERT INTO horarios (configuracion_id, nombre, estado, user_id, usuario_id)
                    VALUES (%s, %s, 'borrador', %s, %s)""",
-                (seed["cfg_id"], f"Fraude {uuid.uuid4().hex[:8]}", uid_b, uid_b),
+                (config_b_id, f"Fraude {uuid.uuid4().hex[:8]}", uid_b, uid_b),
             )
         cur.execute("ROLLBACK TO SAVEPOINT sp_fraude")
 

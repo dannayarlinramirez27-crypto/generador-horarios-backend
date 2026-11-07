@@ -93,3 +93,72 @@ jobs:
       - name: Run SQL integration tests
         run: |
           PYTHONPATH=. pytest tests/test_sql_integration.py -v --tb=short
+
+  # ─────────────────────────────────────────────────────────────
+  # Migración de ownership — servicio Postgres aislado y desechable
+  # ─────────────────────────────────────────────────────────────
+  ownership-migration-validation:
+    name: Validar migración de ownership (Postgres desechable)
+    runs-on: ubuntu-latest
+
+    services:
+      ownership-postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ownership_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ownership_migration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      OWNERSHIP_MIGRATION_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ownership_migration_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize disposable legacy-like database
+        run: |
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/auth_mock.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/schema.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_legacy.sql
+
+      - name: Verify mismatch preflight fails without changing the database
+        run: |
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_mismatch.sql
+          if psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/migrations/20261106_per_account_ownership.sql > ownership-migration-preflight.log 2>&1; then
+            cat ownership-migration-preflight.log
+            echo "Expected the ownership mismatch preflight to fail."
+            exit 1
+          fi
+          grep -Fq "Ownership migration stopped: 1 horarios rows have conflicting user_id and usuario_id values" ownership-migration-preflight.log || {
+            cat ownership-migration-preflight.log
+            echo "The migration failed without the expected mismatch diagnostic."
+            exit 1
+          }
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_preflight_rollback_assertions.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_repair.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_cross_reference_mismatch.sql
+          if psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/migrations/20261106_per_account_ownership.sql > ownership-migration-reference-preflight.log 2>&1; then
+            cat ownership-migration-reference-preflight.log
+            echo "Expected the cross-owner reference preflight to fail."
+            exit 1
+          fi
+          grep -Fq "Ownership migration stopped: 1 docente_materia rows reference a docente or materia with a different owner" ownership-migration-reference-preflight.log || {
+            cat ownership-migration-reference-preflight.log
+            echo "The migration failed without the expected cross-owner reference diagnostic."
+            exit 1
+          }
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_cross_reference_rollback_assertions.sql
+
+      - name: Apply migration twice and assert ownership guarantees
+        run: |
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_repair.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/migrations/20261106_per_account_ownership.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/migrations/20261106_per_account_ownership.sql
+          psql "$OWNERSHIP_MIGRATION_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/account_ownership_migration_assertions.sql

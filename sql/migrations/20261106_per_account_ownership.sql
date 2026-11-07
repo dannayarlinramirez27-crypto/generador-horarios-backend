@@ -154,6 +154,57 @@ BEGIN
 END;
 $$;
 
+-- Reject legacy references that would cross account boundaries after the
+-- owner backfill. These checks run before constraints or policies are changed.
+DO $$
+DECLARE mismatch_count bigint;
+BEGIN
+    SELECT count(*) INTO mismatch_count
+      FROM public.docente_materia x
+      LEFT JOIN public.docentes d ON d.id = x.docente_id
+      LEFT JOIN public.materias m ON m.id = x.materia_id
+     WHERE x.user_id IS DISTINCT FROM d.user_id
+        OR x.user_id IS DISTINCT FROM m.user_id;
+    IF mismatch_count > 0 THEN
+        RAISE EXCEPTION 'Ownership migration stopped: % docente_materia rows reference a docente or materia with a different owner.', mismatch_count;
+    END IF;
+
+    SELECT count(*) INTO mismatch_count
+      FROM public.docente_curso x
+      LEFT JOIN public.docentes d ON d.id = x.docente_id
+      LEFT JOIN public.cursos c ON c.id = x.curso_id
+     WHERE x.user_id IS DISTINCT FROM d.user_id
+        OR x.user_id IS DISTINCT FROM c.user_id;
+    IF mismatch_count > 0 THEN
+        RAISE EXCEPTION 'Ownership migration stopped: % docente_curso rows reference a docente or curso with a different owner.', mismatch_count;
+    END IF;
+
+    SELECT count(*) INTO mismatch_count
+      FROM public.horarios h
+      LEFT JOIN public.configs c ON c.id = h.configuracion_id
+     WHERE h.user_id IS DISTINCT FROM c.user_id;
+    IF mismatch_count > 0 THEN
+        RAISE EXCEPTION 'Ownership migration stopped: % horarios rows reference a config with a different owner.', mismatch_count;
+    END IF;
+
+    SELECT count(*) INTO mismatch_count
+      FROM public.celdas x
+      LEFT JOIN public.horarios h ON h.id = x.horario_id
+      LEFT JOIN public.cursos cu ON cu.id = x.curso_id
+      LEFT JOIN public.materias m ON m.id = x.materia_id
+      LEFT JOIN public.docentes d ON d.id = x.docente_id
+      LEFT JOIN public.salones s ON s.id = x.salon_id
+     WHERE x.user_id IS DISTINCT FROM h.user_id
+        OR x.user_id IS DISTINCT FROM cu.user_id
+        OR x.user_id IS DISTINCT FROM m.user_id
+        OR x.user_id IS DISTINCT FROM d.user_id
+        OR x.user_id IS DISTINCT FROM s.user_id;
+    IF mismatch_count > 0 THEN
+        RAISE EXCEPTION 'Ownership migration stopped: % celdas rows reference a schedule or catalog row with a different owner.', mismatch_count;
+    END IF;
+END;
+$$;
+
 -- Ensure each owner UUID is a real Auth account, without duplicating a
 -- pre-existing FK that already targets auth.users(id).
 DO $$
@@ -293,7 +344,7 @@ CREATE INDEX IF NOT EXISTS idx_celdas_user ON public.celdas (user_id, horario_id
 
 -- Rebuild the owner guard after backfill; parent ownership cannot drift later.
 CREATE OR REPLACE FUNCTION public.validate_row_ownership()
-RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE parent_owner uuid;
 BEGIN
     IF TG_OP = 'UPDATE' AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
@@ -301,13 +352,52 @@ BEGIN
     END IF;
     IF TG_TABLE_NAME = 'horarios' AND NEW.user_id IS DISTINCT FROM NEW.usuario_id THEN
         RAISE EXCEPTION 'horarios.user_id and horarios.usuario_id must match';
-    ELSIF TG_TABLE_NAME IN ('disponibilidades', 'docente_materia', 'docente_curso') THEN
+    END IF;
+
+    IF TG_TABLE_NAME IN ('disponibilidades', 'docente_materia', 'docente_curso') THEN
         SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
+        IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+            RAISE EXCEPTION 'dependent row user_id must match its docente owner';
+        END IF;
+        IF TG_TABLE_NAME = 'docente_materia' THEN
+            SELECT m.user_id INTO parent_owner FROM public.materias m WHERE m.id = NEW.materia_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'docente_materia materia owner must match assignment owner';
+            END IF;
+        ELSIF TG_TABLE_NAME = 'docente_curso' THEN
+            SELECT c.user_id INTO parent_owner FROM public.cursos c WHERE c.id = NEW.curso_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'docente_curso curso owner must match assignment owner';
+            END IF;
+        END IF;
+    ELSIF TG_TABLE_NAME = 'horarios' THEN
+        SELECT c.user_id INTO parent_owner FROM public.configs c WHERE c.id = NEW.configuracion_id;
+        IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+            RAISE EXCEPTION 'horarios config owner must match schedule owner';
+        END IF;
     ELSIF TG_TABLE_NAME IN ('celdas', 'horarios_celdas') THEN
         SELECT h.user_id INTO parent_owner FROM public.horarios h WHERE h.id = NEW.horario_id;
-    END IF;
-    IF parent_owner IS NOT NULL AND NEW.user_id IS DISTINCT FROM parent_owner THEN
-        RAISE EXCEPTION 'dependent row user_id must match its parent owner';
+        IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+            RAISE EXCEPTION 'dependent row user_id must match its horario owner';
+        END IF;
+        IF TG_TABLE_NAME = 'celdas' THEN
+            SELECT cu.user_id INTO parent_owner FROM public.cursos cu WHERE cu.id = NEW.curso_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas curso owner must match cell owner';
+            END IF;
+            SELECT m.user_id INTO parent_owner FROM public.materias m WHERE m.id = NEW.materia_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas materia owner must match cell owner';
+            END IF;
+            SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas docente owner must match cell owner';
+            END IF;
+            SELECT s.user_id INTO parent_owner FROM public.salones s WHERE s.id = NEW.salon_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas salon owner must match cell owner';
+            END IF;
+        END IF;
     END IF;
     RETURN NEW;
 END;

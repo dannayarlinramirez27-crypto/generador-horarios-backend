@@ -219,7 +219,7 @@ CREATE INDEX IF NOT EXISTS idx_celdas_user ON celdas (user_id, horario_id);
 -- Every row keeps the server-assigned owner immutable. Legacy schedule aliases
 -- remain equal for compatibility; child rows are owned by their parent.
 CREATE OR REPLACE FUNCTION public.validate_row_ownership()
-RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
     parent_owner uuid;
 BEGIN
@@ -231,16 +231,50 @@ BEGIN
         RAISE EXCEPTION 'horarios.user_id and horarios.usuario_id must match';
     END IF;
 
-    IF TG_TABLE_NAME = 'disponibilidades' THEN
+    IF TG_TABLE_NAME IN ('disponibilidades', 'docente_materia', 'docente_curso') THEN
         SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
-    ELSIF TG_TABLE_NAME IN ('docente_materia', 'docente_curso') THEN
-        SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
+        IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+            RAISE EXCEPTION 'dependent row user_id must match its docente owner';
+        END IF;
+        IF TG_TABLE_NAME = 'docente_materia' THEN
+            SELECT m.user_id INTO parent_owner FROM public.materias m WHERE m.id = NEW.materia_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'docente_materia materia owner must match assignment owner';
+            END IF;
+        ELSIF TG_TABLE_NAME = 'docente_curso' THEN
+            SELECT c.user_id INTO parent_owner FROM public.cursos c WHERE c.id = NEW.curso_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'docente_curso curso owner must match assignment owner';
+            END IF;
+        END IF;
+    ELSIF TG_TABLE_NAME = 'horarios' THEN
+        SELECT c.user_id INTO parent_owner FROM public.configs c WHERE c.id = NEW.configuracion_id;
+        IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+            RAISE EXCEPTION 'horarios config owner must match schedule owner';
+        END IF;
     ELSIF TG_TABLE_NAME IN ('celdas', 'horarios_celdas') THEN
         SELECT h.user_id INTO parent_owner FROM public.horarios h WHERE h.id = NEW.horario_id;
-    END IF;
-
-    IF parent_owner IS NOT NULL AND NEW.user_id IS DISTINCT FROM parent_owner THEN
-        RAISE EXCEPTION 'dependent row user_id must match its parent owner';
+        IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+            RAISE EXCEPTION 'dependent row user_id must match its horario owner';
+        END IF;
+        IF TG_TABLE_NAME = 'celdas' THEN
+            SELECT cu.user_id INTO parent_owner FROM public.cursos cu WHERE cu.id = NEW.curso_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas curso owner must match cell owner';
+            END IF;
+            SELECT m.user_id INTO parent_owner FROM public.materias m WHERE m.id = NEW.materia_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas materia owner must match cell owner';
+            END IF;
+            SELECT d.user_id INTO parent_owner FROM public.docentes d WHERE d.id = NEW.docente_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas docente owner must match cell owner';
+            END IF;
+            SELECT s.user_id INTO parent_owner FROM public.salones s WHERE s.id = NEW.salon_id;
+            IF parent_owner IS DISTINCT FROM NEW.user_id THEN
+                RAISE EXCEPTION 'celdas salon owner must match cell owner';
+            END IF;
+        END IF;
     END IF;
     RETURN NEW;
 END;
