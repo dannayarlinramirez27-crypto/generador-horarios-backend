@@ -1,3 +1,5 @@
+BEGIN;
+
 DO $$
 DECLARE
     required_owner_columns integer;
@@ -6,6 +8,7 @@ DECLARE
     completion_triggers integer;
     legacy_unique_constraints integer;
     legacy_standalone_unique_indexes integer;
+    legacy_set_user_id_triggers integer;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM auth.users u JOIN public.perfiles p ON p.id = u.id
@@ -155,6 +158,38 @@ BEGIN
         RAISE EXCEPTION 'Expected ownership trigger on horarios_celdas, found %', ownership_triggers;
     END IF;
 
+    SELECT count(*) INTO legacy_set_user_id_triggers
+      FROM pg_trigger t
+      JOIN pg_class r ON r.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = r.relnamespace
+     WHERE n.nspname = 'public'
+       AND r.relname IN (
+           'configs', 'docentes', 'cursos', 'materias', 'salones',
+           'disponibilidades', 'docente_materia', 'docente_curso',
+           'horarios', 'celdas', 'horarios_celdas'
+       )
+       AND NOT t.tgisinternal
+       AND t.tgfoid = to_regprocedure('public.set_user_id()');
+    IF legacy_set_user_id_triggers <> 0 THEN
+        RAISE EXCEPTION 'Expected legacy public.set_user_id() triggers to be removed, found %', legacy_set_user_id_triggers;
+    END IF;
+    IF to_regprocedure('public.set_user_id()') IS NULL THEN
+        RAISE EXCEPTION 'Migration must leave the legacy trigger function intact';
+    END IF;
+    IF to_regprocedure('public.keep_docente_audit()') IS NULL OR NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class r ON r.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = r.relnamespace
+        WHERE n.nspname = 'public' AND r.relname = 'docentes'
+          AND t.tgname = 'set_user_id_unrelated' AND NOT t.tgisinternal
+          AND t.tgfoid = to_regprocedure('public.keep_docente_audit()')
+    ) THEN
+        RAISE EXCEPTION 'Migration removed an unrelated docentes trigger or function';
+    END IF;
+    IF auth.uid() IS NOT NULL THEN
+        RAISE EXCEPTION 'Expected auth.uid() to remain NULL without JWT claims';
+    END IF;
+
     SELECT count(*) INTO completion_triggers
       FROM pg_trigger t
       JOIN pg_class r ON r.oid = t.tgrelid
@@ -196,6 +231,25 @@ BEGIN
          OR (t.relname IN ('cursos', 'materias', 'salones') AND a.attname = 'nombre'));
     IF legacy_standalone_unique_indexes <> 0 THEN
         RAISE EXCEPTION 'Expected legacy global standalone unique indexes to be removed, found %', legacy_standalone_unique_indexes;
+    END IF;
+END;
+$$;
+
+-- The assertion script runs in a transaction and rolls this regression row
+-- back, while proving the backend-supplied owner survives a NULL auth.uid().
+DO $$
+DECLARE inserted_owner public.docentes.user_id%TYPE;
+BEGIN
+    INSERT INTO public.docentes (
+        user_id, nombre, apellido, documento, carga_horaria, activo
+    ) VALUES (
+        'a2c33a5c-7f3d-4c22-b8e8-30a5ac7e4a02',
+        'Post-migration', 'Owner', 'ownership-postmigration-preserved', 2, true
+    )
+    RETURNING user_id INTO inserted_owner;
+
+    IF inserted_owner IS DISTINCT FROM 'a2c33a5c-7f3d-4c22-b8e8-30a5ac7e4a02'::uuid THEN
+        RAISE EXCEPTION 'A NULL auth.uid() overwrote the explicit docente owner';
     END IF;
 END;
 $$;
@@ -286,3 +340,5 @@ BEGIN
     UPDATE public.horarios SET estado = 'completo' WHERE id = 910009;
 END;
 $$;
+
+ROLLBACK;

@@ -99,6 +99,33 @@ BEGIN
 END;
 $$;
 
+-- The API connects directly with psycopg and supplies the verified owner UUID
+-- itself. Remove only legacy triggers bound to public.set_user_id(); that
+-- function reads auth.uid(), which is NULL without a Supabase JWT context.
+-- Keep the function and any unrelated triggers intact. Catalog lookup also
+-- makes this safe when the legacy function or optional table is absent.
+DO $$
+DECLARE legacy_trigger record;
+BEGIN
+    FOR legacy_trigger IN
+        SELECT t.tgname, r.relname
+          FROM pg_trigger t
+          JOIN pg_class r ON r.oid = t.tgrelid
+          JOIN pg_namespace n ON n.oid = r.relnamespace
+         WHERE n.nspname = 'public'
+           AND r.relname = ANY (ARRAY[
+               'configs', 'docentes', 'cursos', 'materias', 'salones',
+               'disponibilidades', 'docente_materia', 'docente_curso',
+               'horarios', 'celdas', 'horarios_celdas'
+           ])
+           AND NOT t.tgisinternal
+           AND t.tgfoid = to_regprocedure('public.set_user_id()')
+    LOOP
+        EXECUTE format('DROP TRIGGER %I ON public.%I', legacy_trigger.tgname, legacy_trigger.relname);
+    END LOOP;
+END;
+$$;
+
 -- A previous partial rollout may already have installed the guard; remove it
 -- while owner values are being reconciled, then recreate it after backfill.
 DO $$

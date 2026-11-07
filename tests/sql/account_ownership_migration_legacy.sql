@@ -175,3 +175,95 @@ UPDATE public.docente_materia SET user_id = NULL WHERE id = 910007;
 UPDATE public.docente_curso SET user_id = NULL WHERE id = 910008;
 UPDATE public.horarios SET user_id = NULL WHERE id = 910009;
 UPDATE public.celdas SET user_id = NULL WHERE id = 910010;
+
+-- Reproduce the production legacy triggers on docentes. The evidence list
+-- contains ten trigger names (despite the report's stated count of nine).
+-- Override the CI auth mock only in this disposable migration database so a
+-- connection without JWT claims gets the production behavior: auth.uid() = NULL.
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
+LANGUAGE sql STABLE AS $$
+    SELECT NULL::uuid;
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_user_id()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.user_id := auth.uid();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER set_user_id_configs BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_horarios BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_horarios_celdas BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_materias BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_perfiles BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_salones BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_salones_cursos BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_salones_disponibilidades BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_salones_docente_curso BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+CREATE TRIGGER set_user_id_salones_docente_materia BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.set_user_id();
+
+-- This similarly named trigger must survive because its function is unrelated.
+CREATE OR REPLACE FUNCTION public.keep_docente_audit()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER set_user_id_unrelated BEFORE INSERT ON public.docentes
+FOR EACH ROW EXECUTE FUNCTION public.keep_docente_audit();
+
+DO $$
+DECLARE
+    legacy_trigger_count integer;
+    probe_id public.docentes.id%TYPE;
+    observed_owner public.docentes.user_id%TYPE;
+BEGIN
+    SELECT count(*) INTO legacy_trigger_count
+      FROM pg_trigger t
+      JOIN pg_class r ON r.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = r.relnamespace
+     WHERE n.nspname = 'public'
+       AND r.relname = 'docentes'
+       AND NOT t.tgisinternal
+       AND t.tgfoid = to_regprocedure('public.set_user_id()')
+       AND t.tgname = ANY (ARRAY[
+           'set_user_id_configs', 'set_user_id_horarios',
+           'set_user_id_horarios_celdas', 'set_user_id_materias',
+           'set_user_id_perfiles', 'set_user_id_salones',
+           'set_user_id_salones_cursos', 'set_user_id_salones_disponibilidades',
+           'set_user_id_salones_docente_curso', 'set_user_id_salones_docente_materia'
+       ]);
+    IF legacy_trigger_count <> 10 THEN
+        RAISE EXCEPTION 'Expected the ten production set_user_id triggers on docentes, found %', legacy_trigger_count;
+    END IF;
+    IF auth.uid() IS NOT NULL THEN
+        RAISE EXCEPTION 'Expected auth.uid() to be NULL without JWT claims';
+    END IF;
+
+    -- Reproduce the failed direct-psycopg POST, then remove the probe inside
+    -- this atomic block so the migration fixture remains limited to its seeds.
+    INSERT INTO public.docentes (
+        user_id, nombre, apellido, documento, carga_horaria, activo
+    ) VALUES (
+        'a2c33a5c-7f3d-4c22-b8e8-30a5ac7e4a02',
+        'Legacy-trigger', 'Probe', 'ownership-legacy-trigger-probe', 2, true
+    )
+    RETURNING id, user_id INTO probe_id, observed_owner;
+    IF observed_owner IS NOT NULL THEN
+        RAISE EXCEPTION 'Expected legacy public.set_user_id() triggers to overwrite the explicit owner with NULL';
+    END IF;
+    DELETE FROM public.docentes WHERE id = probe_id;
+END;
+$$;
